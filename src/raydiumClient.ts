@@ -279,11 +279,11 @@ export class RaydiumClientImpl implements RaydiumClient {
 
     let priceDec: Decimal;
     if (isBertMintA) {
-      // BERT=mintA, SOL=mintB: pool price = SOL per BERT = solUsd / bertUsd
-      priceDec = new Decimal(solUsd).div(bertUsd);
-    } else {
-      // SOL=mintA, BERT=mintB: pool price = BERT per SOL = bertUsd / solUsd
+      // BERT=mintA, SOL=mintB: pool price = mintB/mintA = SOL per BERT = bertUsd / solUsd
       priceDec = new Decimal(bertUsd).div(solUsd);
+    } else {
+      // SOL=mintA, BERT=mintB: pool price = mintB/mintA = BERT per SOL = solUsd / bertUsd
+      priceDec = new Decimal(solUsd).div(bertUsd);
     }
 
     return TickMath.getTickWithPriceAndTickspacing(

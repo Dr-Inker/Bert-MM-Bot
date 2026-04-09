@@ -62,6 +62,8 @@ export interface BotConfig {
   rpcOutageMinutes: number;
   minSolBalance: number;
   hardPauseSolBalance: number;
+  minSolFloorLamports: number;
+  priorityFeeMicroLamports: number;
   pollIntervalSec: number;
   feeCollectionMode: 'on_rebalance' | 'scheduled';
   feeHandling: 'compound' | 'sweep';

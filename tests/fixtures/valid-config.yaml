@@ -14,6 +14,8 @@ oracleStaleMinutes: 15
 rpcOutageMinutes: 5
 minSolBalance: 0.1
 hardPauseSolBalance: 0.03
+minSolFloorLamports: 100000000
+priorityFeeMicroLamports: 10000
 pollIntervalSec: 30
 feeCollectionMode: "on_rebalance"
 feeHandling: "compound"

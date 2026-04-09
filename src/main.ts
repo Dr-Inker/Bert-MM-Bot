@@ -7,8 +7,10 @@ import { Notifier } from './notifier.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { RaydiumClientImpl } from './raydiumClient.js';
+import { TxSubmitter } from './txSubmitter.js';
 import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
+import { executeRebalance } from './rebalancer.js';
 import type { BotState, MidPrice } from './types.js';
 
 const CONFIG_PATH = process.env.BERT_MM_CONFIG ?? '/etc/bert-mm-bot/config.yaml';
@@ -34,6 +36,8 @@ async function main(): Promise<void> {
     payer,
   );
   await raydium.init();
+
+  const submitter = new TxSubmitter(raydium.getConnection(), payer);
 
   const stored = state.getCurrentPosition();
   const onchain = stored ? await raydium.getPosition(stored.nftMint, 0) : null;
@@ -96,8 +100,18 @@ async function main(): Promise<void> {
       logger.info({ decision: decision.kind, reason: decision.reason }, 'tick decision');
 
       if (decision.kind === 'REBALANCE') {
-        // Task 13 wires the full rebalance sequence.
-        await notifier.send('INFO', `REBALANCE would fire: ${decision.reason}`);
+        if (!mid) {
+          // Shouldn't happen — strategy.decide guards this — but be safe
+          logger.warn('REBALANCE decision with no mid price, skipping');
+        } else {
+          const result = await executeRebalance(
+            { raydium, submitter, state, notifier, config: cfg },
+            mid,
+            position,
+            decision.reason,
+          );
+          logger.info({ result }, 'rebalance complete');
+        }
       } else if (decision.kind === 'PAUSE') {
         await notifier.send('CRITICAL', `PAUSE: ${decision.reason}`);
       } else if (decision.kind === 'ALERT_ONLY') {

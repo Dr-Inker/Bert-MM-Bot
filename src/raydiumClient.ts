@@ -28,6 +28,8 @@ export interface OpenPositionParams {
   upperUsd: number;
   bertAmountRaw: bigint;
   solAmountLamports: bigint;
+  /** Trusted oracle SOL/USD price — required for tick conversion. */
+  solUsd: number;
 }
 
 export interface PoolState {
@@ -42,6 +44,7 @@ export interface PoolState {
 
 export interface RaydiumClient {
   init(): Promise<void>;
+  getConnection(): Connection;
   getPoolState(): Promise<PoolState>;
   /**
    * Fetch the on-chain position identified by `nftMint`.
@@ -81,6 +84,10 @@ export class RaydiumClientImpl implements RaydiumClient {
     private readonly bertMint: string,
     private readonly payer?: Keypair,
   ) {}
+
+  getConnection(): Connection {
+    return this.connection;
+  }
 
   async init(): Promise<void> {
     this.connection = new Connection(this.rpcPrimary, 'confirmed');
@@ -297,38 +304,16 @@ export class RaydiumClientImpl implements RaydiumClient {
   async buildOpenPositionTx(
     params: OpenPositionParams,
   ): Promise<{ tx: Transaction; nftMint: string }> {
-    const { lowerUsd, upperUsd, bertAmountRaw, solAmountLamports } = params;
+    const { lowerUsd, upperUsd, bertAmountRaw, solAmountLamports, solUsd } = params;
     await this._ensurePoolData();
     const poolInfo = this._poolInfo!;
     const poolKeys = this._poolKeys;
     const computePoolInfo = this._computePoolInfo!;
     const isBertMintA = poolInfo.mintA.address === this.bertMint;
 
-    // Get current pool solUsd via price ratio: we don't have solUsd here,
-    // but the caller always passes bertAmountRaw and solAmountLamports which
-    // imply the ratio. For tick conversion we need an external solUsd.
-    // The caller provides lowerUsd/upperUsd (bertUsd) and we need solUsd.
-    // Derive solUsd from the pool's current sqrtPriceX64 and the bertUsd midpoint.
-    const centerBertUsd = (lowerUsd + upperUsd) / 2;
-    // pool price = BERT per SOL (for isBertMintA=false) or SOL per BERT (isBertMintA=true)
-    const poolPrice = SqrtPriceMath.sqrtPriceX64ToPrice(
-      computePoolInfo.sqrtPriceX64,
-      poolInfo.mintA.decimals,
-      poolInfo.mintB.decimals,
-    ).toNumber();
-
-    let derivedSolUsd: number;
-    if (isBertMintA) {
-      // poolPrice = SOL per BERT → solUsd = poolPrice * centerBertUsd
-      derivedSolUsd = poolPrice * centerBertUsd;
-    } else {
-      // poolPrice = BERT per SOL → solUsd = centerBertUsd / poolPrice
-      derivedSolUsd = centerBertUsd > 0 && poolPrice > 0 ? centerBertUsd / poolPrice : 0;
-    }
-
-    // Convert USD bounds to ticks
-    const tick1 = this._usdToTick(lowerUsd, derivedSolUsd);
-    const tick2 = this._usdToTick(upperUsd, derivedSolUsd);
+    // Convert USD bounds to ticks using the oracle-provided solUsd
+    const tick1 = this._usdToTick(lowerUsd, solUsd);
+    const tick2 = this._usdToTick(upperUsd, solUsd);
     // Ensure tick ordering (lower < upper)
     const tickLower = Math.min(tick1, tick2);
     const tickUpper = Math.max(tick1, tick2);

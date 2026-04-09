@@ -48,6 +48,8 @@ const BotConfigSchema = z
     rpcOutageMinutes: z.number().int().min(1).max(30),
     minSolBalance: z.number().positive(),
     hardPauseSolBalance: z.number().positive(),
+    minSolFloorLamports: z.number().int().positive().default(100_000_000),
+    priorityFeeMicroLamports: z.number().int().positive().default(10_000),
     pollIntervalSec: z.number().int().min(10).max(300),
     feeCollectionMode: z.enum(['on_rebalance', 'scheduled']),
     feeHandling: z.enum(['compound', 'sweep']),

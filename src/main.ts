@@ -5,8 +5,9 @@ import { logger } from './logger.js';
 import { StateStore } from './stateStore.js';
 import { Notifier } from './notifier.js';
 import { decide, StrategyParams } from './strategy.js';
-import { computeTrustedMid, fetchAllSources, PriceFetchers } from './priceOracle.js';
+import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { RaydiumClientImpl } from './raydiumClient.js';
+import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
 import type { BotState, MidPrice } from './types.js';
 
@@ -25,11 +26,17 @@ async function main(): Promise<void> {
   const keyJson = JSON.parse(readFileSync(cfg.keyfilePath, 'utf8')) as number[];
   const payer = Keypair.fromSecretKey(Uint8Array.from(keyJson));
 
-  const raydium = new RaydiumClientImpl(cfg.rpcPrimary, cfg.rpcFallback, cfg.poolAddress, payer);
+  const raydium = new RaydiumClientImpl(
+    cfg.rpcPrimary,
+    cfg.rpcFallback,
+    cfg.poolAddress,
+    cfg.bertMint,
+    payer,
+  );
   await raydium.init();
 
   const stored = state.getCurrentPosition();
-  const onchain = stored ? await raydium.getPosition(stored.nftMint) : null;
+  const onchain = stored ? await raydium.getPosition(stored.nftMint, 0) : null;
   const rec = reconcile(stored, onchain);
   if (rec.kind === 'MISMATCH') {
     await notifier.send(
@@ -50,12 +57,7 @@ async function main(): Promise<void> {
     pollIntervalSec: cfg.pollIntervalSec,
   };
 
-  // Task 13 wires real fetchers.
-  const fetchers: PriceFetchers = {
-    fetchRaydium: async () => null,
-    fetchJupiter: async () => null,
-    fetchDexScreener: async () => null,
-  };
+  const fetchers = makeFetchers(raydium, cfg.poolAddress);
 
   const priceHistory: MidPrice[] = [];
   await notifier.send('INFO', `bert-mm-bot started (dryRun=${cfg.dryRun})`);
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
 
       const storedPos = state.getCurrentPosition();
       const position = storedPos
-        ? await raydium.getPosition(storedPos.nftMint).catch(() => null)
+        ? await raydium.getPosition(storedPos.nftMint, mid?.solUsd ?? 0).catch(() => null)
         : null;
 
       const botState: BotState = {

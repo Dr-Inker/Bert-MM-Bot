@@ -1,0 +1,26 @@
+[Unit]
+Description=BERT Market-Maker Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bertmm
+Group=bertmm
+WorkingDirectory=/opt/bert-mm-bot
+Environment=NODE_ENV=production
+Environment=BERT_MM_CONFIG=/etc/bert-mm-bot/config.yaml
+EnvironmentFile=-/etc/bert-mm-bot/env
+ExecStart=/usr/bin/node /opt/bert-mm-bot/dist/main.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/bert-mm-bot/bot.log
+StandardError=append:/var/log/bert-mm-bot/bot.log
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bert-mm-bot /var/log/bert-mm-bot
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

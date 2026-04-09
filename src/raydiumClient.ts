@@ -1,4 +1,5 @@
 import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import {
   Raydium,
   SqrtPriceMath,
@@ -61,6 +62,7 @@ export interface RaydiumClient {
     haveSolLamports: bigint;
     targetBertRatio: number;
   }): Promise<Transaction>;
+  getWalletBalances(): Promise<{ solLamports: bigint; bertRaw: bigint }>;
   simulateClose(
     nftMint: string,
     solUsd: number,
@@ -619,5 +621,36 @@ export class RaydiumClientImpl implements RaydiumClient {
       logger.info('buildSwapToRatioTx: already at target ratio, no swap needed');
       return new Transaction();
     }
+  }
+
+  async getWalletBalances(): Promise<{ solLamports: bigint; bertRaw: bigint }> {
+    if (!this.payer) {
+      throw new Error('getWalletBalances requires payer to be set (read-only mode not supported)');
+    }
+
+    // Fetch SOL balance
+    const solBalance = await this.connection.getBalance(this.payer.publicKey);
+    const solLamports = BigInt(solBalance);
+
+    // Fetch BERT token account balance
+    let bertRaw = 0n;
+    try {
+      const ata = getAssociatedTokenAddressSync(
+        new PublicKey(this.bertMint),
+        this.payer.publicKey,
+      );
+      const tokenBalance = await this.connection.getTokenAccountBalance(ata);
+      bertRaw = BigInt(tokenBalance.value.amount);
+    } catch (e: unknown) {
+      // If the ATA doesn't exist, return 0 rather than throwing
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.toLowerCase().includes('account not found') || msg.toLowerCase().includes('could not find account')) {
+        logger.info({ bertMint: this.bertMint }, 'BERT ATA not found, returning 0 balance');
+      } else {
+        throw e;
+      }
+    }
+
+    return { solLamports, bertRaw };
   }
 }

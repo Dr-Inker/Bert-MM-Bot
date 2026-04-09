@@ -115,9 +115,6 @@ export async function executeRebalance(
   } catch (e) {
     logger.warn({ err: e }, 'getPoolState after close failed — proceeding anyway');
   }
-  // TODO(stage-d): fetch actual wallet ATA balances via RPC and verify they reflect the close.
-  // For now we rely on the SDK building the open tx against on-chain ATAs — if balances are
-  // wrong, submission of the open tx will fail on-chain.
 
   // ─── Step 5: Compute new range ───────────────────────────────────────────────
   const centerBertUsd = mid.bertUsd;
@@ -125,23 +122,84 @@ export async function executeRebalance(
   const lowerUsd = centerBertUsd - halfWidth;
   const upperUsd = centerBertUsd + halfWidth;
 
-  // ─── Step 6: Inventory cap + SOL floor ───────────────────────────────────────
-  // 50/50 split up to maxPositionUsd
-  const targetBertUsd = cfg.maxPositionUsd / 2;
-  const targetSolUsd = cfg.maxPositionUsd / 2;
+  // ─── Step 6 + 7: Fetch wallet balances, enforce SOL floor, swap to 50/50 ─────
+  let targetBertUsd: number;
+  let targetSolUsd: number;
+  let bertAmountRaw: bigint;
+  let solAmountLamports: bigint;
 
-  // TODO(stage-d): fetch wallet SOL balance and enforce minSolFloorLamports.
-  // Currently we pass through the targets; the open tx will fail on-chain if SOL is insufficient.
+  try {
+    // After close confirmed, fetch real balances
+    const balances = await raydium.getWalletBalances();
+    logger.info(
+      { balances: { sol: balances.solLamports.toString(), bert: balances.bertRaw.toString() } },
+      'post-close balances',
+    );
 
-  const bertAmountRaw = BigInt(Math.floor((targetBertUsd / mid.bertUsd) * 1e6));
-  const solAmountLamports = BigInt(Math.floor((targetSolUsd / mid.solUsd) * 1e9));
+    // Reserve SOL floor for fees + future txs
+    const usableSol =
+      balances.solLamports > BigInt(cfg.minSolFloorLamports)
+        ? balances.solLamports - BigInt(cfg.minSolFloorLamports)
+        : 0n;
 
-  // ─── Step 7: Swap to target ratio ────────────────────────────────────────────
-  // TODO(stage-d): wire wallet balance fetch then call buildSwapToRatioTx.
-  // After closing the position we receive BERT+SOL in the pool's current ratio, which
-  // may differ from the 50/50 target. Stage D will fetch balances and call buildSwapToRatioTx
-  // to rebalance the wallet before opening the new position.
-  logger.info('Stage C: skipping swap-to-ratio step (wallet balance fetch not yet wired)');
+    // Compute total USD value of usable inventory
+    const usableSolUsd = (Number(usableSol) / 1e9) * mid.solUsd;
+    const usableBertUsd = (Number(balances.bertRaw) / 1e6) * mid.bertUsd;
+    const totalUsableUsd = usableSolUsd + usableBertUsd;
+
+    // Cap at maxPositionUsd
+    const targetTotalUsd = Math.min(totalUsableUsd, cfg.maxPositionUsd);
+
+    // 50/50 target ratio
+    targetBertUsd = targetTotalUsd / 2;
+    targetSolUsd = targetTotalUsd / 2;
+    const targetBertRatio = 0.5;
+
+    // Swap if current ratio differs from target by more than 1%
+    const currentBertRatio =
+      totalUsableUsd > 0 ? usableBertUsd / totalUsableUsd : 0.5;
+    if (Math.abs(currentBertRatio - targetBertRatio) > 0.01) {
+      const swapTx = await raydium.buildSwapToRatioTx({
+        haveBertRaw: balances.bertRaw,
+        haveSolLamports: usableSol,
+        targetBertRatio,
+      });
+      // buildSwapToRatioTx may return an empty Transaction if no swap needed
+      if (swapTx.instructions.length > 0) {
+        const swapSig = await submitter.submit(swapTx, {
+          priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
+          dryRun: cfg.dryRun,
+        });
+        logger.info({ swapSig }, 'swap to ratio submitted');
+        // Re-fetch balances after swap
+        if (!cfg.dryRun) {
+          const postSwapBalances = await raydium.getWalletBalances();
+          logger.info(
+            {
+              postSwap: {
+                sol: postSwapBalances.solLamports.toString(),
+                bert: postSwapBalances.bertRaw.toString(),
+              },
+            },
+            'post-swap balances',
+          );
+        }
+      }
+    }
+
+    bertAmountRaw = BigInt(Math.floor((targetBertUsd / mid.bertUsd) * 1e6));
+    solAmountLamports = BigInt(Math.floor((targetSolUsd / mid.solUsd) * 1e9));
+  } catch (e) {
+    // Swap failure after close: we have unbalanced inventory in the wallet — treat as FAILED
+    const detail = `swap-to-ratio failed after close: ${String(e)}`;
+    logger.error({ err: e, closeSig }, detail);
+    state.setDegraded(true, detail);
+    await notifier.send(
+      'CRITICAL',
+      `Rebalance FAILED (swap-to-ratio) — close sig=${closeSig ?? 'N/A'}, swap error: ${String(e)}. Bot is DEGRADED.`,
+    );
+    return { kind: 'FAILED', detail };
+  }
 
   // ─── Step 8: Open new position ───────────────────────────────────────────────
   let openSig: string;
@@ -197,7 +255,7 @@ export async function executeRebalance(
     );
   }
 
-  const summary = `REBALANCE ${cfg.dryRun ? '(DRY RUN) ' : ''}OK — closed ${oldNftMint ?? 'none'} opened ${newNftMint}, range $${lowerUsd.toFixed(6)}-$${upperUsd.toFixed(6)}, value $${(targetBertUsd + targetSolUsd).toFixed(2)}. NOTE: swap-to-ratio step skipped (Stage D).`;
+  const summary = `REBALANCE ${cfg.dryRun ? '(DRY RUN) ' : ''}OK — closed ${oldNftMint ?? 'none'} opened ${newNftMint}, range $${lowerUsd.toFixed(6)}-$${upperUsd.toFixed(6)}, value $${(targetBertUsd + targetSolUsd).toFixed(2)}.`;
   await notifier.send('INFO', summary);
 
   const detail = `closed=${closeSig ?? 'none'} opened=${openSig} nft=${newNftMint}`;

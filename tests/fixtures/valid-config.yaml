@@ -1,0 +1,30 @@
+enabled: true
+poolAddress: "9LkdXDXQkWC8RgqMTn2eAnzgFTNjKjJiSq4smpdKLuaH"
+bertMint: "HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump"
+rangeWidthPct: 20
+sustainedMinutes: 10
+minRebalanceIntervalMin: 60
+maxRebalancesPerDay: 6
+maxSlippageBps: 100
+maxDrawdownPct: 15
+drawdownWindowMin: 30
+maxPositionUsd: 2200
+oracleDivergenceBps: 150
+oracleStaleMinutes: 15
+rpcOutageMinutes: 5
+minSolBalance: 0.1
+hardPauseSolBalance: 0.03
+pollIntervalSec: 30
+feeCollectionMode: "on_rebalance"
+feeHandling: "compound"
+rpcPrimary: "https://rpc.example.com/primary"
+rpcFallback: "https://rpc.example.com/fallback"
+keyfilePath: "/etc/bert-mm-bot/hot-wallet.json"
+statePath: "/var/lib/bert-mm-bot/state.db"
+killSwitchFilePath: "/var/lib/bert-mm-bot/KILLSWITCH"
+heartbeatPath: "/var/lib/bert-mm-bot/heartbeat.txt"
+notifier:
+  discord:
+    webhookInfo: "https://discord.com/api/webhooks/info"
+    webhookCritical: "https://discord.com/api/webhooks/critical"
+dryRun: false

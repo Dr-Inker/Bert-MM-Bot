@@ -2,15 +2,26 @@ import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import {
   Raydium,
   SqrtPriceMath,
+  LiquidityMath,
+  PoolUtils,
+  TickMath,
+  TxVersion,
   type ApiV3PoolInfoConcentratedItem,
   type ClmmKeys,
   type ComputeClmmPoolInfo,
+  type ReturnTypeFetchMultiplePoolTickArrays,
 } from '@raydium-io/raydium-sdk-v2';
+import BN from 'bn.js';
+import Decimal from 'decimal.js';
 import { logger } from './logger.js';
 import type { PositionSnapshot } from './types.js';
 
 // CLMM program ID for Raydium Concentrated Liquidity
 const CLMM_PROGRAM_ID = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
+
+// Pool-specific constants (confirmed by inspect-pool Stage A)
+const TICK_SPACING = 120;
+const SLIPPAGE_BPS = 100; // 1% slippage tolerance
 
 export interface OpenPositionParams {
   lowerUsd: number;
@@ -49,6 +60,7 @@ export interface RaydiumClient {
   }): Promise<Transaction>;
   simulateClose(
     nftMint: string,
+    solUsd: number,
   ): Promise<{ effectivePriceUsd: number; bertOut: bigint; solOut: bigint }>;
 }
 
@@ -60,6 +72,7 @@ export class RaydiumClientImpl implements RaydiumClient {
   private _poolInfo?: ApiV3PoolInfoConcentratedItem;
   private _poolKeys?: ClmmKeys;
   private _computePoolInfo?: ComputeClmmPoolInfo;
+  private _tickData?: ReturnTypeFetchMultiplePoolTickArrays;
 
   constructor(
     private readonly rpcPrimary: string,
@@ -82,13 +95,14 @@ export class RaydiumClientImpl implements RaydiumClient {
   }
 
   async getPoolState(): Promise<PoolState> {
-    const { poolInfo, poolKeys, computePoolInfo } =
+    const { poolInfo, poolKeys, computePoolInfo, tickData } =
       await this.raydium.clmm.getPoolInfoFromRpc(this.poolAddress);
 
-    // Cache for use by getPosition()
+    // Cache for use by getPosition() and write methods
     this._poolInfo = poolInfo;
     this._poolKeys = poolKeys;
     this._computePoolInfo = computePoolInfo;
+    this._tickData = tickData;
 
     // feeTier: poolInfo.feeRate is a raw integer (e.g. 10000 = 1%).
     // Convert to fraction: 10000 / 1_000_000 = 0.01
@@ -136,6 +150,7 @@ export class RaydiumClientImpl implements RaydiumClient {
       await this.getPoolState();
     }
     const poolInfo = this._poolInfo!;
+    const computePoolInfo = this._computePoolInfo!;
 
     // Determine mint ordering: SOL=mintA, BERT=mintB (confirmed by inspect-pool)
     const isBertMintA = poolInfo.mintA.address === this.bertMint;
@@ -183,12 +198,38 @@ export class RaydiumClientImpl implements RaydiumClient {
       uncollectedFeesBert = BigInt(pos.tokenFeesOwedB.toString());
     }
 
-    // Token amounts from liquidity: set to 0n for now (Stage B will compute properly)
-    // TODO(Stage B): use LiquidityMath.getAmountsFromLiquidity to compute actual amounts
-    const bertAmount = 0n;
-    const solAmount = 0n;
+    // Compute actual token amounts from position liquidity using LiquidityMath
+    const sqrtCurrent = computePoolInfo.sqrtPriceX64;
+    const { amountA, amountB } = LiquidityMath.getAmountsFromLiquidity(
+      sqrtCurrent,
+      sqrtLower,
+      sqrtUpper,
+      pos.liquidity,
+      /* roundUp */ true,
+    );
 
-    const totalValueUsd = 0; // Can't compute without amounts
+    // Map amountA/amountB to BERT/SOL based on mint ordering
+    let bertAmount: bigint;
+    let solAmount: bigint;
+    if (isBertMintA) {
+      bertAmount = BigInt(amountA.toString());
+      solAmount = BigInt(amountB.toString());
+    } else {
+      // SOL=mintA, BERT=mintB
+      solAmount = BigInt(amountA.toString());
+      bertAmount = BigInt(amountB.toString());
+    }
+
+    // totalValueUsd: BERT value + SOL value
+    const bertValueUsd =
+      centerBertUsd > 0
+        ? (Number(bertAmount) / Math.pow(10, isBertMintA ? decimalsA : decimalsB)) * centerBertUsd
+        : 0;
+    const solValueUsd =
+      solUsd > 0
+        ? (Number(solAmount) / 1e9) * solUsd
+        : 0;
+    const totalValueUsd = bertValueUsd + solValueUsd;
 
     // openedAt: not available on-chain; the orchestrator prefers state.db's openedAt.
     // We return Date.now() as a fallback.
@@ -211,26 +252,387 @@ export class RaydiumClientImpl implements RaydiumClient {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Write-side helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Convert a USD price for BERT to the nearest valid tick (multiple of tickSpacing).
+   * Pool is SOL=mintA (9 dec), BERT=mintB (6 dec), so pool price = BERT per SOL.
+   * bertPerSol = bertUsd / solUsd → higher bertUsd = lower tick (less BERT per SOL).
+   */
+  private _usdToTick(bertUsd: number, solUsd: number): number {
+    if (solUsd <= 0 || bertUsd <= 0) {
+      throw new Error(`Invalid USD prices: bertUsd=${bertUsd}, solUsd=${solUsd}`);
+    }
+    const poolInfo = this._poolInfo!;
+    const isBertMintA = poolInfo.mintA.address === this.bertMint;
+
+    let priceDec: Decimal;
+    if (isBertMintA) {
+      // BERT=mintA, SOL=mintB: pool price = SOL per BERT = solUsd / bertUsd
+      priceDec = new Decimal(solUsd).div(bertUsd);
+    } else {
+      // SOL=mintA, BERT=mintB: pool price = BERT per SOL = bertUsd / solUsd
+      priceDec = new Decimal(bertUsd).div(solUsd);
+    }
+
+    return TickMath.getTickWithPriceAndTickspacing(
+      priceDec,
+      TICK_SPACING,
+      poolInfo.mintA.decimals,
+      poolInfo.mintB.decimals,
+    );
+  }
+
+  /**
+   * Ensure pool data is populated; if not, refresh it.
+   */
+  private async _ensurePoolData(): Promise<void> {
+    if (!this._poolInfo || !this._computePoolInfo || !this._tickData) {
+      await this.getPoolState();
+    }
+  }
+
   async buildOpenPositionTx(
-    _params: OpenPositionParams,
+    params: OpenPositionParams,
   ): Promise<{ tx: Transaction; nftMint: string }> {
-    throw new Error('buildOpenPositionTx: wire to Raydium SDK in Task 13 Stage B');
+    const { lowerUsd, upperUsd, bertAmountRaw, solAmountLamports } = params;
+    await this._ensurePoolData();
+    const poolInfo = this._poolInfo!;
+    const poolKeys = this._poolKeys;
+    const computePoolInfo = this._computePoolInfo!;
+    const isBertMintA = poolInfo.mintA.address === this.bertMint;
+
+    // Get current pool solUsd via price ratio: we don't have solUsd here,
+    // but the caller always passes bertAmountRaw and solAmountLamports which
+    // imply the ratio. For tick conversion we need an external solUsd.
+    // The caller provides lowerUsd/upperUsd (bertUsd) and we need solUsd.
+    // Derive solUsd from the pool's current sqrtPriceX64 and the bertUsd midpoint.
+    const centerBertUsd = (lowerUsd + upperUsd) / 2;
+    // pool price = BERT per SOL (for isBertMintA=false) or SOL per BERT (isBertMintA=true)
+    const poolPrice = SqrtPriceMath.sqrtPriceX64ToPrice(
+      computePoolInfo.sqrtPriceX64,
+      poolInfo.mintA.decimals,
+      poolInfo.mintB.decimals,
+    ).toNumber();
+
+    let derivedSolUsd: number;
+    if (isBertMintA) {
+      // poolPrice = SOL per BERT → solUsd = poolPrice * centerBertUsd
+      derivedSolUsd = poolPrice * centerBertUsd;
+    } else {
+      // poolPrice = BERT per SOL → solUsd = centerBertUsd / poolPrice
+      derivedSolUsd = centerBertUsd > 0 && poolPrice > 0 ? centerBertUsd / poolPrice : 0;
+    }
+
+    // Convert USD bounds to ticks
+    const tick1 = this._usdToTick(lowerUsd, derivedSolUsd);
+    const tick2 = this._usdToTick(upperUsd, derivedSolUsd);
+    // Ensure tick ordering (lower < upper)
+    const tickLower = Math.min(tick1, tick2);
+    const tickUpper = Math.max(tick1, tick2);
+
+    // Compute liquidity from the input amounts
+    // amountA and amountB must match the pool's mint ordering
+    const amountA = new BN(
+      isBertMintA ? bertAmountRaw.toString() : solAmountLamports.toString(),
+    );
+    const amountB = new BN(
+      isBertMintA ? solAmountLamports.toString() : bertAmountRaw.toString(),
+    );
+
+    const sqrtLower = SqrtPriceMath.getSqrtPriceX64FromTick(tickLower);
+    const sqrtUpper = SqrtPriceMath.getSqrtPriceX64FromTick(tickUpper);
+
+    const liquidity = LiquidityMath.getLiquidityFromTokenAmounts(
+      computePoolInfo.sqrtPriceX64,
+      sqrtLower,
+      sqrtUpper,
+      amountA,
+      amountB,
+    );
+
+    // amountMax with 1% slippage buffer (add=true direction for open)
+    const slippageFactor = 1 + SLIPPAGE_BPS / 10_000;
+    const amountMaxA = new BN(Math.ceil(Number(amountA.toString()) * slippageFactor).toString());
+    const amountMaxB = new BN(Math.ceil(Number(amountB.toString()) * slippageFactor).toString());
+
+    logger.info(
+      { tickLower, tickUpper, liquidity: liquidity.toString(), amountMaxA: amountMaxA.toString(), amountMaxB: amountMaxB.toString() },
+      'buildOpenPositionTx: computed params',
+    );
+
+    const result = await this.raydium.clmm.openPositionFromLiquidity({
+      poolInfo,
+      poolKeys,
+      ownerInfo: { useSOLBalance: true },
+      tickLower,
+      tickUpper,
+      liquidity,
+      amountMaxA,
+      amountMaxB,
+      withMetadata: 'create',
+      txVersion: TxVersion.LEGACY,
+      computeBudgetConfig: undefined,
+    });
+
+    const tx = result.transaction as Transaction;
+    const nftMint = result.extInfo.address.nftMint.toBase58();
+
+    return { tx, nftMint };
   }
+
   async buildClosePositionTx(
-    _nftMint: string,
+    nftMint: string,
   ): Promise<{ tx: Transaction; expectedBertOut: bigint; expectedSolOut: bigint }> {
-    throw new Error('buildClosePositionTx: wire to Raydium SDK in Task 13 Stage B');
+    await this._ensurePoolData();
+    const poolInfo = this._poolInfo!;
+    const poolKeys = this._poolKeys;
+    const isBertMintA = poolInfo.mintA.address === this.bertMint;
+
+    // Fetch the position
+    const positions = await this.raydium.clmm.getOwnerPositionInfo({
+      programId: new PublicKey(CLMM_PROGRAM_ID),
+    });
+    const pos = positions.find((p) => p.nftMint.toBase58() === nftMint);
+    if (!pos) throw new Error(`buildClosePositionTx: position not found for nftMint=${nftMint}`);
+
+    // Fetch epochInfo for fee-aware amount computation
+    const epochInfo = await this.connection.getEpochInfo();
+
+    // Compute expected output amounts with 1% slippage (add=false = remove liquidity)
+    const slippage = SLIPPAGE_BPS / 10_000;
+    const amounts = await PoolUtils.getAmountsFromLiquidity({
+      poolInfo,
+      tickLower: pos.tickLower,
+      tickUpper: pos.tickUpper,
+      liquidity: pos.liquidity,
+      slippage,
+      add: false,
+      epochInfo,
+    });
+
+    // amountSlippageA/B are the minimum amounts after slippage
+    const amountMinA = amounts.amountSlippageA.amount;
+    const amountMinB = amounts.amountSlippageB.amount;
+
+    logger.info(
+      {
+        nftMint,
+        liquidity: pos.liquidity.toString(),
+        amountMinA: amountMinA.toString(),
+        amountMinB: amountMinB.toString(),
+      },
+      'buildClosePositionTx: computed close params',
+    );
+
+    const result = await this.raydium.clmm.decreaseLiquidity({
+      poolInfo,
+      poolKeys,
+      ownerPosition: pos,
+      ownerInfo: { useSOLBalance: true, closePosition: true },
+      liquidity: pos.liquidity,
+      amountMinA,
+      amountMinB,
+      txVersion: TxVersion.LEGACY,
+    });
+
+    const tx = result.transaction as Transaction;
+
+    // Map amountA/B to BERT/SOL based on mint ordering
+    const expectedBertOut = isBertMintA
+      ? BigInt(amounts.amountA.amount.toString())
+      : BigInt(amounts.amountB.amount.toString());
+    const expectedSolOut = isBertMintA
+      ? BigInt(amounts.amountB.amount.toString())
+      : BigInt(amounts.amountA.amount.toString());
+
+    return { tx, expectedBertOut, expectedSolOut };
   }
-  async buildSwapToRatioTx(_params: {
+
+  async simulateClose(
+    nftMint: string,
+    solUsd: number,
+  ): Promise<{ effectivePriceUsd: number; bertOut: bigint; solOut: bigint }> {
+    await this._ensurePoolData();
+    const poolInfo = this._poolInfo!;
+    const isBertMintA = poolInfo.mintA.address === this.bertMint;
+
+    // Fetch the position
+    const positions = await this.raydium.clmm.getOwnerPositionInfo({
+      programId: new PublicKey(CLMM_PROGRAM_ID),
+    });
+    const pos = positions.find((p) => p.nftMint.toBase58() === nftMint);
+    if (!pos) throw new Error(`simulateClose: position not found for nftMint=${nftMint}`);
+
+    const epochInfo = await this.connection.getEpochInfo();
+    const slippage = SLIPPAGE_BPS / 10_000;
+
+    const amounts = await PoolUtils.getAmountsFromLiquidity({
+      poolInfo,
+      tickLower: pos.tickLower,
+      tickUpper: pos.tickUpper,
+      liquidity: pos.liquidity,
+      slippage,
+      add: false,
+      epochInfo,
+    });
+
+    const bertOut = isBertMintA
+      ? BigInt(amounts.amountA.amount.toString())
+      : BigInt(amounts.amountB.amount.toString());
+    const solOut = isBertMintA
+      ? BigInt(amounts.amountB.amount.toString())
+      : BigInt(amounts.amountA.amount.toString());
+
+    const bertDecimals = isBertMintA ? poolInfo.mintA.decimals : poolInfo.mintB.decimals;
+    const bertOutHuman = Number(bertOut) / Math.pow(10, bertDecimals);
+    const solOutHuman = Number(solOut) / 1e9;
+
+    // effectivePriceUsd: implied BERT/USD price derived from current pool price + solUsd.
+    // Returned as a convenience metric for callers — not used for slippage calculations.
+    let effectivePriceUsd = 0;
+    if (bertOutHuman > 0 && solUsd > 0) {
+      const computePoolInfo = this._computePoolInfo!;
+      const poolPrice = SqrtPriceMath.sqrtPriceX64ToPrice(
+        computePoolInfo.sqrtPriceX64,
+        poolInfo.mintA.decimals,
+        poolInfo.mintB.decimals,
+      ).toNumber();
+      // poolPrice = BERT per SOL (isBertMintA=false) or SOL per BERT (isBertMintA=true)
+      effectivePriceUsd = isBertMintA
+        ? poolPrice * solUsd
+        : poolPrice > 0 ? solUsd / poolPrice : 0;
+    }
+
+    return { effectivePriceUsd, bertOut, solOut };
+  }
+
+  async buildSwapToRatioTx(params: {
     haveBertRaw: bigint;
     haveSolLamports: bigint;
     targetBertRatio: number;
   }): Promise<Transaction> {
-    throw new Error('buildSwapToRatioTx: wire to Raydium SDK in Task 13 Stage B');
-  }
-  async simulateClose(
-    _nftMint: string,
-  ): Promise<{ effectivePriceUsd: number; bertOut: bigint; solOut: bigint }> {
-    throw new Error('simulateClose: wire to Raydium SDK in Task 13 Stage B');
+    const { haveBertRaw, haveSolLamports, targetBertRatio } = params;
+    await this._ensurePoolData();
+    const poolInfo = this._poolInfo!;
+    const poolKeys = this._poolKeys;
+    const computePoolInfo = this._computePoolInfo!;
+    const tickData = this._tickData!;
+    const isBertMintA = poolInfo.mintA.address === this.bertMint;
+
+    // Pool price = BERT per SOL (when isBertMintA=false) or SOL per BERT (when isBertMintA=true)
+    const poolPrice = SqrtPriceMath.sqrtPriceX64ToPrice(
+      computePoolInfo.sqrtPriceX64,
+      poolInfo.mintA.decimals,
+      poolInfo.mintB.decimals,
+    ).toNumber();
+
+    // Convert to common unit: BERT per SOL
+    const bertPerSol = isBertMintA
+      ? poolPrice > 0 ? 1 / poolPrice : 0  // poolPrice = SOL per BERT → bertPerSol = 1/poolPrice
+      : poolPrice;                           // poolPrice = BERT per SOL already
+
+    // Total value in "BERT units" (for ratio calculation)
+    // haveBertRaw is in raw BERT (6 dec), haveSolLamports is in lamports (9 dec)
+    const bertDecimals = isBertMintA ? poolInfo.mintA.decimals : poolInfo.mintB.decimals;
+    const bertHuman = Number(haveBertRaw) / Math.pow(10, bertDecimals);
+    const solHuman = Number(haveSolLamports) / 1e9;
+
+    // targetBertRatio is fraction of total value to hold as BERT (0..1)
+    // currentBertValue = bertHuman, currentSolValueInBert = solHuman * bertPerSol
+    const totalInBert = bertHuman + solHuman * bertPerSol;
+    const targetBertHuman = totalInBert * targetBertRatio;
+    const deltaBert = targetBertHuman - bertHuman; // positive = need more BERT (buy BERT, sell SOL)
+
+    const SLIPPAGE_FACTOR = 1 - SLIPPAGE_BPS / 10_000;
+
+    // Get the per-pool tick array cache
+    const poolTickCache = tickData[this.poolAddress] ?? {};
+
+    let inputMint: PublicKey;
+    let amountIn: BN;
+    let amountOutMin: BN;
+
+    if (deltaBert > 0) {
+      // Need more BERT → sell SOL, buy BERT
+      const deltaSolHuman = deltaBert / bertPerSol;
+      const deltaSolLamports = Math.round(deltaSolHuman * 1e9);
+      amountIn = new BN(deltaSolLamports.toString());
+      inputMint = new PublicKey(poolInfo.mintA.address); // SOL = mintA
+
+      // Compute expected output
+      const { expectedAmountOut, remainingAccounts } =
+        PoolUtils.getOutputAmountAndRemainAccounts(
+          computePoolInfo,
+          poolTickCache,
+          inputMint,
+          amountIn,
+        );
+      amountOutMin = new BN(
+        Math.floor(Number(expectedAmountOut.toString()) * SLIPPAGE_FACTOR).toString(),
+      );
+
+      logger.info(
+        { direction: 'SOL→BERT', amountIn: amountIn.toString(), expectedOut: expectedAmountOut.toString() },
+        'buildSwapToRatioTx',
+      );
+
+      const result = await this.raydium.clmm.swap({
+        poolInfo,
+        poolKeys,
+        inputMint,
+        amountIn,
+        amountOutMin,
+        observationId: new PublicKey(poolKeys!.observationId),
+        ownerInfo: { useSOLBalance: true },
+        remainingAccounts,
+        txVersion: TxVersion.LEGACY,
+      });
+      return result.transaction as Transaction;
+    } else if (deltaBert < 0) {
+      // Have too much BERT → sell BERT, buy SOL
+      const excessBertHuman = -deltaBert;
+      const excessBertRaw = Math.round(excessBertHuman * Math.pow(10, bertDecimals));
+      amountIn = new BN(excessBertRaw.toString());
+      inputMint = new PublicKey(poolInfo.mintB.address); // BERT = mintB (assuming isBertMintA=false)
+      if (isBertMintA) {
+        inputMint = new PublicKey(poolInfo.mintA.address);
+      }
+
+      const { expectedAmountOut, remainingAccounts } =
+        PoolUtils.getOutputAmountAndRemainAccounts(
+          computePoolInfo,
+          poolTickCache,
+          inputMint,
+          amountIn,
+        );
+      amountOutMin = new BN(
+        Math.floor(Number(expectedAmountOut.toString()) * SLIPPAGE_FACTOR).toString(),
+      );
+
+      logger.info(
+        { direction: 'BERT→SOL', amountIn: amountIn.toString(), expectedOut: expectedAmountOut.toString() },
+        'buildSwapToRatioTx',
+      );
+
+      const result = await this.raydium.clmm.swap({
+        poolInfo,
+        poolKeys,
+        inputMint,
+        amountIn,
+        amountOutMin,
+        observationId: new PublicKey(poolKeys!.observationId),
+        ownerInfo: { useSOLBalance: true },
+        remainingAccounts,
+        txVersion: TxVersion.LEGACY,
+      });
+      return result.transaction as Transaction;
+    } else {
+      // Already at target ratio — return empty transaction
+      logger.info('buildSwapToRatioTx: already at target ratio, no swap needed');
+      return new Transaction();
+    }
   }
 }

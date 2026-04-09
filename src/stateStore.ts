@@ -121,6 +121,32 @@ export class StateStore {
     return rows.map((r) => ({ ts: r.ts, command: r.command, osUser: r.os_user }));
   }
 
+  listRebalancesSince(sinceMs: number): RebalanceRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT ts, old_center_usd, new_center_usd, fees_collected_usd FROM rebalance_log WHERE ts >= ? ORDER BY ts DESC',
+      )
+      .all(sinceMs) as Array<{
+      ts: number;
+      old_center_usd: number;
+      new_center_usd: number;
+      fees_collected_usd: number;
+    }>;
+    return rows.map((r) => ({
+      ts: r.ts,
+      oldCenterUsd: r.old_center_usd,
+      newCenterUsd: r.new_center_usd,
+      feesCollectedUsd: r.fees_collected_usd,
+    }));
+  }
+
+  listOperatorActionsSince(sinceMs: number): OperatorAction[] {
+    const rows = this.db
+      .prepare('SELECT ts, command, os_user FROM operator_actions WHERE ts >= ? ORDER BY ts DESC')
+      .all(sinceMs) as Array<{ ts: number; command: string; os_user: string }>;
+    return rows.map((r) => ({ ts: r.ts, command: r.command, osUser: r.os_user }));
+  }
+
   close(): void {
     this.db.close();
   }

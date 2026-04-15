@@ -28,7 +28,8 @@ const NotifierSchema = z
   })
   .refine((n) => n.telegram || n.discord, {
     message: 'at least one of telegram/discord must be configured',
-  });
+  })
+  .optional();
 
 const BotConfigSchema = z
   .object({

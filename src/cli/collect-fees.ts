@@ -9,7 +9,7 @@ import { buildRuntime, osUser } from './_helpers.js';
 
 export async function runCollectFees(cfg: BotConfig, state: StateStore): Promise<void> {
   const { raydium, submitter } = await buildRuntime(cfg);
-  const notifier = new Notifier(cfg.notifier);
+  const notifier = new Notifier(cfg.notifier ?? {});
 
   const fetchers = makeFetchers(raydium, cfg.poolAddress);
   const samples = await fetchAllSources(fetchers);

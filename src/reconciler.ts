@@ -6,10 +6,11 @@ export type ReconcileResult =
   | { kind: 'OK_MATCH' }
   | { kind: 'MISMATCH'; reason: string };
 
-const TOLERANCE = 1e-6;
-
+// Tick-to-USD conversion introduces rounding; use relative tolerance of 2%
 function approxEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) < TOLERANCE;
+  if (a === 0 && b === 0) return true;
+  const denom = Math.max(Math.abs(a), Math.abs(b));
+  return Math.abs(a - b) / denom < 0.02;
 }
 
 export function reconcile(

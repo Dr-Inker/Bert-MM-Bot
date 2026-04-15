@@ -73,7 +73,7 @@ export interface BotConfig {
   statePath: string;
   killSwitchFilePath: string;
   heartbeatPath: string;
-  notifier: {
+  notifier?: {
     telegram?: { botToken: string; chatIdInfo: string; chatIdCritical: string };
     discord?: { webhookInfo: string; webhookCritical: string };
   };

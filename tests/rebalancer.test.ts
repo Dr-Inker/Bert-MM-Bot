@@ -95,7 +95,7 @@ function makeDeps(overrides: Partial<RebalancerDeps> = {}): RebalancerDeps {
     getConnection: vi.fn(),
     getPoolState: vi.fn().mockResolvedValue({}),
     getPosition: vi.fn(),
-    buildOpenPositionTx: vi.fn().mockResolvedValue({ tx: FAKE_OPEN_TX, nftMint: FAKE_NFT_MINT }),
+    buildOpenPositionTx: vi.fn().mockResolvedValue({ tx: FAKE_OPEN_TX, nftMint: FAKE_NFT_MINT, signers: [] }),
     buildClosePositionTx: vi.fn().mockResolvedValue({
       tx: FAKE_CLOSE_TX,
       expectedBertOut: 500_000n,

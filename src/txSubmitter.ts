@@ -12,6 +12,7 @@ export interface SubmitOptions {
   priorityFeeMicroLamports?: number;
   maxRetries?: number;
   dryRun?: boolean;
+  extraSigners?: import('@solana/web3.js').Signer[];
 }
 
 export class TxSubmitter {
@@ -35,7 +36,8 @@ export class TxSubmitter {
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        const sig = await sendAndConfirmTransaction(this.connection, tx, [this.payer], {
+        const allSigners = [this.payer, ...(opts.extraSigners ?? [])];
+        const sig = await sendAndConfirmTransaction(this.connection, tx, allSigners, {
           commitment: 'confirmed',
           maxRetries: 1,
         });

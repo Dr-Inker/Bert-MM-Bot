@@ -34,7 +34,7 @@ export function makeFetchers(raydium: RaydiumClient, poolAddress: string) {
       try {
         // 1 BERT in → SOL out. Input amount: 10^BERT_DECIMALS (1 whole BERT).
         const inAmount = 10 ** BERT_DECIMALS;
-        const url = `https://quote-api.jup.ag/v6/quote?inputMint=${BERT_MINT}&outputMint=${SOL_MINT}&amount=${inAmount}&slippageBps=50&onlyDirectRoutes=false`;
+        const url = `https://api.jup.ag/swap/v1/quote?inputMint=${BERT_MINT}&outputMint=${SOL_MINT}&amount=${inAmount}&slippageBps=50`;
         const res = await fetch(url);
         if (!res.ok) return null;
         const data = (await res.json()) as { outAmount: string };
@@ -42,7 +42,7 @@ export function makeFetchers(raydium: RaydiumClient, poolAddress: string) {
 
         // Fetch SOL-USD price from Jupiter (SOL→USDC)
         const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-        const solUsdUrl = `https://quote-api.jup.ag/v6/quote?inputMint=${SOL_MINT}&outputMint=${USDC_MINT}&amount=${10 ** SOL_DECIMALS}&slippageBps=50`;
+        const solUsdUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${SOL_MINT}&outputMint=${USDC_MINT}&amount=${10 ** SOL_DECIMALS}&slippageBps=50`;
         const solRes = await fetch(solUsdUrl);
         if (!solRes.ok) return null;
         const solData = (await solRes.json()) as { outAmount: string };

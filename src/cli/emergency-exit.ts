@@ -20,7 +20,7 @@ export async function runEmergencyExit(cfg: BotConfig, state: StateStore): Promi
   }
 
   const { raydium, submitter } = await buildRuntime(cfg);
-  const notifier = new Notifier(cfg.notifier);
+  const notifier = new Notifier(cfg.notifier ?? {});
 
   const storedPos = state.getCurrentPosition();
   if (!storedPos) {

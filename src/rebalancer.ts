@@ -56,7 +56,11 @@ export async function executeRebalance(
         );
       }
     } catch (e) {
-      logger.warn({ err: e }, 'simulateClose failed — skipping drawdown check');
+      // C3 fix: fail CLOSED — if we can't verify drawdown is safe, don't rebalance
+      const detail = `simulateClose failed — refusing to rebalance without drawdown check: ${String(e)}`;
+      logger.error({ err: e }, detail);
+      await notifier.send('CRITICAL', `DRAWDOWN CHECK FAILED: ${detail}`);
+      return { kind: 'SKIPPED', detail };
     }
   }
 
@@ -206,7 +210,7 @@ export async function executeRebalance(
   let newNftMint: string;
 
   try {
-    const { tx: openTx, nftMint } = await raydium.buildOpenPositionTx({
+    const { tx: openTx, nftMint, signers: openSigners } = await raydium.buildOpenPositionTx({
       lowerUsd,
       upperUsd,
       bertAmountRaw,
@@ -217,6 +221,7 @@ export async function executeRebalance(
     openSig = await submitter.submit(openTx, {
       priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
       dryRun: cfg.dryRun,
+      extraSigners: openSigners,
     });
     newNftMint = nftMint;
   } catch (e) {

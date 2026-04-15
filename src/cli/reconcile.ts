@@ -7,7 +7,7 @@ import { buildRuntime, osUser } from './_helpers.js';
 
 export async function runReconcile(cfg: BotConfig, state: StateStore): Promise<void> {
   const { raydium } = await buildRuntime(cfg);
-  const notifier = new Notifier(cfg.notifier);
+  const notifier = new Notifier(cfg.notifier ?? {});
 
   const stored = state.getCurrentPosition();
   const onchain = stored ? await raydium.getPosition(stored.nftMint, 0) : null;

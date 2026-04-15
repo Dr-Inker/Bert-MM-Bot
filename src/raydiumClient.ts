@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, Signer, Transaction } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import {
   Raydium,
@@ -53,7 +53,7 @@ export interface RaydiumClient {
    * Pass `mid?.solUsd ?? 0` from the orchestrator; a value of 0 yields zero USD bounds.
    */
   getPosition(nftMint: string, solUsd: number): Promise<PositionSnapshot | null>;
-  buildOpenPositionTx(params: OpenPositionParams): Promise<{ tx: Transaction; nftMint: string }>;
+  buildOpenPositionTx(params: OpenPositionParams): Promise<{ tx: Transaction; nftMint: string; signers: Signer[] }>;
   buildClosePositionTx(
     nftMint: string,
   ): Promise<{ tx: Transaction; expectedBertOut: bigint; expectedSolOut: bigint }>;
@@ -100,7 +100,9 @@ export class RaydiumClientImpl implements RaydiumClient {
       disableLoadToken: true,
       owner: this.payer ? this.payer.publicKey : undefined,
     });
-    logger.info({ slot, rpc: this.rpcPrimary, pool: this.poolAddress }, 'raydium client initialized');
+    // H1 fix: redact API key from log output
+    const rpcHost = new URL(this.rpcPrimary).hostname;
+    logger.info({ slot, rpc: rpcHost, pool: this.poolAddress }, 'raydium client initialized');
   }
 
   async getPoolState(): Promise<PoolState> {
@@ -305,7 +307,7 @@ export class RaydiumClientImpl implements RaydiumClient {
 
   async buildOpenPositionTx(
     params: OpenPositionParams,
-  ): Promise<{ tx: Transaction; nftMint: string }> {
+  ): Promise<{ tx: Transaction; nftMint: string; signers: Signer[] }> {
     const { lowerUsd, upperUsd, bertAmountRaw, solAmountLamports, solUsd } = params;
     await this._ensurePoolData();
     const poolInfo = this._poolInfo!;
@@ -366,8 +368,9 @@ export class RaydiumClientImpl implements RaydiumClient {
 
     const tx = result.transaction as Transaction;
     const nftMint = result.extInfo.address.nftMint.toBase58();
+    const signers = (result as any).signers as Signer[] ?? [];
 
-    return { tx, nftMint };
+    return { tx, nftMint, signers };
   }
 
   async buildClosePositionTx(

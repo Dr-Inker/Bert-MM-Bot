@@ -22,7 +22,11 @@ export function computeTrustedMid(
   const divergence = ((max - min) / median) * 10_000;
   if (divergence > divergenceBps) return null;
   const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
-  const solUsdMean = samples.reduce((a, s) => a + s.solUsd, 0) / samples.length;
+  // C4 fix: exclude solUsd=0 (e.g. DexScreener fallback) from mean to prevent poisoning
+  const validSolSamples = samples.filter((s) => s.solUsd > 0);
+  const solUsdMean = validSolSamples.length > 0
+    ? validSolSamples.reduce((a, s) => a + s.solUsd, 0) / validSolSamples.length
+    : _solUsd; // fall back to caller-provided solUsd if all sources return 0
   return {
     bertUsd: mean,
     solUsd: solUsdMean,

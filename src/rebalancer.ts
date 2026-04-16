@@ -163,36 +163,62 @@ export async function executeRebalance(
     const currentBertRatio =
       totalUsableUsd > 0 ? usableBertUsd / totalUsableUsd : 0.5;
     if (Math.abs(currentBertRatio - targetBertRatio) > 0.01) {
-      const swapTx = await raydium.buildSwapToRatioTx({
-        haveBertRaw: balances.bertRaw,
-        haveSolLamports: usableSol,
-        targetBertRatio,
-      });
-      // buildSwapToRatioTx may return an empty Transaction if no swap needed
-      if (swapTx.instructions.length > 0) {
-        const swapSig = await submitter.submit(swapTx, {
-          priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
-          dryRun: cfg.dryRun,
+      try {
+        const swapTx = await raydium.buildSwapToRatioTx({
+          haveBertRaw: balances.bertRaw,
+          haveSolLamports: usableSol,
+          targetBertRatio,
         });
-        logger.info({ swapSig }, 'swap to ratio submitted');
-        // Re-fetch balances after swap
-        if (!cfg.dryRun) {
-          const postSwapBalances = await raydium.getWalletBalances();
-          logger.info(
-            {
-              postSwap: {
-                sol: postSwapBalances.solLamports.toString(),
-                bert: postSwapBalances.bertRaw.toString(),
+        // buildSwapToRatioTx may return an empty Transaction if no swap needed
+        if (swapTx.instructions.length > 0) {
+          const swapSig = await submitter.submit(swapTx, {
+            priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
+            dryRun: cfg.dryRun,
+          });
+          logger.info({ swapSig }, 'swap to ratio submitted');
+          // Re-fetch balances after swap
+          if (!cfg.dryRun) {
+            const postSwapBalances = await raydium.getWalletBalances();
+            logger.info(
+              {
+                postSwap: {
+                  sol: postSwapBalances.solLamports.toString(),
+                  bert: postSwapBalances.bertRaw.toString(),
+                },
               },
-            },
-            'post-swap balances',
-          );
+              'post-swap balances',
+            );
+          }
+        }
+      } catch (swapErr) {
+        if (!currentPosition) {
+          // Initial position open on an empty pool — swap fails because no liquidity.
+          // Proceed with whatever balance we have; DLMM supports single-sided deposits.
+          logger.warn({ err: swapErr }, 'swap-to-ratio failed on initial open — depositing available balances');
+        } else {
+          throw swapErr; // Re-throw for rebalance (not initial open)
         }
       }
     }
 
-    bertAmountRaw = BigInt(Math.floor((targetBertUsd / mid.bertUsd) * 1e6));
-    solAmountLamports = BigInt(Math.floor((targetSolUsd / mid.solUsd) * 1e9));
+    // Re-fetch balances in case swap changed them, then use actual holdings
+    // (handles both post-swap and failed-swap-on-empty-pool cases)
+    if (!cfg.dryRun) {
+      const finalBal = await raydium.getWalletBalances();
+      const finalUsableSol = finalBal.solLamports > BigInt(cfg.minSolFloorLamports)
+        ? finalBal.solLamports - BigInt(cfg.minSolFloorLamports)
+        : 0n;
+      const finalBertUsd = (Number(finalBal.bertRaw) / 1e6) * mid.bertUsd;
+      const finalSolUsd = (Number(finalUsableSol) / 1e9) * mid.solUsd;
+      const finalTotalUsd = finalBertUsd + finalSolUsd;
+      const capUsd = Math.min(finalTotalUsd, cfg.maxPositionUsd);
+      const scale = finalTotalUsd > 0 ? capUsd / finalTotalUsd : 0;
+      bertAmountRaw = BigInt(Math.floor(Number(finalBal.bertRaw) * scale));
+      solAmountLamports = BigInt(Math.floor(Number(finalUsableSol) * scale));
+    } else {
+      bertAmountRaw = BigInt(Math.floor((targetBertUsd / mid.bertUsd) * 1e6));
+      solAmountLamports = BigInt(Math.floor((targetSolUsd / mid.solUsd) * 1e9));
+    }
   } catch (e) {
     // Swap failure after close: we have unbalanced inventory in the wallet — treat as FAILED
     const detail = `swap-to-ratio failed after close: ${String(e)}`;

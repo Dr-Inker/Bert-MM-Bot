@@ -77,9 +77,12 @@ export function makeFetchers(raydium: VenueClient, poolAddress: string) {
             quoteToken?: { address: string };
           }>;
         };
-        const target = data.pairs.find(
-          (p) => p.dexId === 'raydium' && p.pairAddress === poolAddress,
-        );
+        // Search by pool address across all DEXes (supports Raydium, Meteora, etc.)
+        let target = data.pairs.find((p) => p.pairAddress === poolAddress);
+        // Fallback: use highest-volume pool for this token if our pool isn't listed yet
+        if (!target && data.pairs.length > 0) {
+          target = data.pairs[0]; // DexScreener returns sorted by volume desc
+        }
         if (!target || !target.priceUsd) return null;
         const bertUsd = Number(target.priceUsd);
         // Derive solUsd from priceNative if available

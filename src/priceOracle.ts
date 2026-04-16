@@ -48,8 +48,14 @@ export async function fetchAllSources(fetchers: PriceFetchers): Promise<PriceSam
     fetchers.fetchJupiter(),
     fetchers.fetchDexScreener(),
   ]);
-  return results
+  const samples = results
     .filter((r): r is PromiseFulfilledResult<PriceSample | null> => r.status === 'fulfilled')
     .map((r) => r.value)
     .filter((s): s is PriceSample => s !== null);
+  // Debug: log sources on every 10th tick (remove after canary validation)
+  if (Math.random() < 0.1) {
+    const { logger } = await import('./logger.js');
+    logger.info({ sources: samples.map(s => ({ src: s.source, bert: s.bertUsd.toFixed(6), sol: s.solUsd.toFixed(2) })), count: samples.length }, 'oracle sources debug');
+  }
+  return samples;
 }

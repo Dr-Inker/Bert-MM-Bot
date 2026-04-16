@@ -1,7 +1,8 @@
 import { Connection, Keypair, PublicKey, Signer, Transaction } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
-import DLMM, { getPriceOfBinByBinId, StrategyType } from '@meteora-ag/dlmm';
+import { createRequire } from 'node:module';
 import BN from 'bn.js';
+import Decimal from 'decimal.js';
 import { logger } from './logger.js';
 import type { PositionSnapshot } from './types.js';
 import type {
@@ -10,6 +11,24 @@ import type {
   VenueClient,
 } from './venueClient.js';
 
+// ---------------------------------------------------------------------------
+// DLMM import workaround
+//
+// @meteora-ag/dlmm's ESM entry tries to import a directory from @coral-xyz/anchor
+// which Node's ESM resolver rejects (ERR_UNSUPPORTED_DIR_IMPORT). Loading via
+// createRequire forces CJS resolution and avoids the issue.
+// ---------------------------------------------------------------------------
+const require = createRequire(import.meta.url);
+const dlmmModule = require('@meteora-ag/dlmm') as {
+  default?: any;
+  DLMM?: any;
+  getPriceOfBinByBinId: (binId: number, binStep: number) => Decimal;
+  StrategyType: { Spot: number; Curve: number; BidAsk: number };
+};
+const DLMM = dlmmModule.default ?? dlmmModule.DLMM ?? dlmmModule;
+const getPriceOfBinByBinId = dlmmModule.getPriceOfBinByBinId;
+const StrategyType = dlmmModule.StrategyType;
+
 const BERT_DECIMALS = 6;
 const SOL_DECIMALS = 9;
 const SLIPPAGE_BPS = 300; // 3% slippage tolerance
@@ -17,7 +36,7 @@ const FULL_BPS = new BN(10_000); // 100% in basis points
 
 export class MeteoraClientImpl implements VenueClient {
   private connection!: Connection;
-  private dlmmPool!: DLMM;
+  private dlmmPool!: any;
 
   /** true when BERT is tokenX in the pool, false when BERT is tokenY */
   private bertIsX!: boolean;
@@ -99,7 +118,7 @@ export class MeteoraClientImpl implements VenueClient {
     );
 
     const pos = userPositions.find(
-      (p) => p.publicKey.toBase58() === nftMint,
+      (p: any) => p.publicKey.toBase58() === nftMint,
     );
     if (!pos) return null;
 
@@ -259,7 +278,7 @@ export class MeteoraClientImpl implements VenueClient {
       this.payer.publicKey,
     );
 
-    const pos = userPositions.find((p) => p.publicKey.toBase58() === nftMint);
+    const pos = userPositions.find((p: any) => p.publicKey.toBase58() === nftMint);
     if (!pos) throw new Error(`buildClosePositionTx: position not found for ${nftMint}`);
 
     const data = pos.positionData;
@@ -319,7 +338,7 @@ export class MeteoraClientImpl implements VenueClient {
       this.payer.publicKey,
     );
 
-    const pos = userPositions.find((p) => p.publicKey.toBase58() === nftMint);
+    const pos = userPositions.find((p: any) => p.publicKey.toBase58() === nftMint);
     if (!pos) throw new Error(`simulateClose: position not found for ${nftMint}`);
 
     const data = pos.positionData;

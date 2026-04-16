@@ -27,8 +27,14 @@ import BN from 'bn.js';
 // In CJS mode the DLMM class's static methods (createLbPair, etc.) are
 // exported as top-level functions rather than on a class object.
 // ---------------------------------------------------------------------------
+
+interface PresetEntry {
+  publicKey: PublicKey;
+  account: { binStep: number; baseFactor: number };
+}
+
 const require = createRequire(import.meta.url);
-const DLMM = require('@meteora-ag/dlmm') as {
+const dlmm = require('@meteora-ag/dlmm') as {
   getPairPubkeyIfExists(
     connection: Connection, tokenX: PublicKey, tokenY: PublicKey,
     binStep: BN, baseFactor: BN, baseFeePowerFactor?: BN,
@@ -36,7 +42,10 @@ const DLMM = require('@meteora-ag/dlmm') as {
   ): Promise<PublicKey | null>;
   getAllPresetParameters(
     connection: Connection, opt?: { cluster?: string },
-  ): Promise<Array<{ publicKey: PublicKey; account: { binStep: number; baseFactor: number } }>>;
+  ): Promise<{
+    presetParameter: PresetEntry[];
+    presetParameter2: PresetEntry[];
+  }>;
   createLbPair(
     connection: Connection, funder: PublicKey, tokenX: PublicKey, tokenY: PublicKey,
     binStep: BN, baseFactor: BN, presetParameter: PublicKey, activeId: BN,
@@ -45,14 +54,39 @@ const DLMM = require('@meteora-ag/dlmm') as {
 };
 
 // ---------------------------------------------------------------------------
+// Probe mode: list all low-fee presets
+// ---------------------------------------------------------------------------
+
+if (process.argv.includes('--list-presets')) {
+  const cfgYaml = parse(readFileSync('/etc/bert-mm-bot/config.yaml', 'utf8')) as { rpcPrimary: string };
+  const conn = new Connection(cfgYaml.rpcPrimary, 'confirmed');
+  const { presetParameter, presetParameter2 } = await dlmm.getAllPresetParameters(conn);
+  const all = [...presetParameter, ...presetParameter2];
+  const lowFee = all
+    .map(p => ({
+      binStep: p.account.binStep,
+      baseFactor: p.account.baseFactor,
+      fee: (p.account.binStep * p.account.baseFactor * 10) / 1e9,
+      pubkey: p.publicKey.toBase58(),
+    }))
+    .filter(p => p.fee <= 0.003)
+    .sort((a, b) => a.fee - b.fee);
+  console.log('=== Presets with fee <= 0.30% ===');
+  for (const p of lowFee) {
+    console.log(`  bin_step=${String(p.binStep).padStart(4)}  base_factor=${String(p.baseFactor).padStart(6)}  fee=${(p.fee * 100).toFixed(4)}%  ${p.pubkey}`);
+  }
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const BERT_MINT = new PublicKey('HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump');
 const SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
 
-const BIN_STEP = 20;
-const BASE_FACTOR = 5000;
+const BIN_STEP = 10;
+const BASE_FACTOR = 10000;
 
 const CONFIG_PATH = '/etc/bert-mm-bot/config.yaml';
 const WALLET_PATH = '/etc/bert-mm-bot/hot-wallet.json';
@@ -197,7 +231,7 @@ async function main() {
   // DLMM SDK may order tokens internally; try both orderings
   let existingPool: PublicKey | null = null;
   try {
-    existingPool = await DLMM.getPairPubkeyIfExists(
+    existingPool = await dlmm.getPairPubkeyIfExists(
       connection,
       BERT_MINT,
       SOL_MINT,
@@ -210,7 +244,7 @@ async function main() {
 
   if (!existingPool) {
     try {
-      existingPool = await DLMM.getPairPubkeyIfExists(
+      existingPool = await dlmm.getPairPubkeyIfExists(
         connection,
         SOL_MINT,
         BERT_MINT,
@@ -231,30 +265,38 @@ async function main() {
   console.log();
 
   // Step 4: Find matching preset parameter
+  // getAllPresetParameters returns { presetParameter: [...], presetParameter2: [...] }
   console.log('[4/6] Finding preset parameter for bin_step=%d, base_factor=%d...', BIN_STEP, BASE_FACTOR);
-  const allPresets = await DLMM.getAllPresetParameters(connection);
+  const presetResult = await dlmm.getAllPresetParameters(connection);
+  const allPresets: PresetEntry[] = [
+    ...(presetResult.presetParameter ?? []),
+    ...(presetResult.presetParameter2 ?? []),
+  ];
   console.log(`  Found ${allPresets.length} preset(s) on-chain.`);
 
-  const matchingPreset = allPresets.find((p: { account: { binStep: number; baseFactor: number }; publicKey: PublicKey }) => {
-    const account = p.account;
+  const matchingPreset = allPresets.find((p) => {
     return (
-      account.binStep === BIN_STEP &&
-      account.baseFactor === BASE_FACTOR
+      p.account.binStep === BIN_STEP &&
+      p.account.baseFactor === BASE_FACTOR
     );
   });
 
   if (!matchingPreset) {
     console.error('\n  ERROR: No preset matches bin_step=%d, base_factor=%d.', BIN_STEP, BASE_FACTOR);
-    console.error('  Available presets:');
-    for (const p of allPresets) {
-      const a = (p as { account: { binStep: number; baseFactor: number }; publicKey: PublicKey });
+    console.error('  Available presets with bin_step=%d:', BIN_STEP);
+    const relevantPresets = allPresets.filter((p) => p.account.binStep === BIN_STEP);
+    if (relevantPresets.length === 0) {
+      console.error('    (none found for this bin_step)');
+    }
+    for (const p of relevantPresets) {
+      const baseFee = ((p.account.binStep * p.account.baseFactor) / 1_000_000).toFixed(2);
       console.error(
-        '    bin_step=%d  base_factor=%d  pubkey=%s',
-        a.account.binStep,
-        a.account.baseFactor,
-        a.publicKey.toBase58(),
+        `    bin_step=${p.account.binStep}  base_factor=${p.account.baseFactor}  base_fee=${baseFee}%  pubkey=${p.publicKey.toBase58()}`,
       );
     }
+    console.error('\n  All unique bin_step values:');
+    const uniqueSteps = [...new Set(allPresets.map((p) => p.account.binStep))].sort((a, b) => a - b);
+    console.error('    %s', uniqueSteps.join(', '));
     throw new Error('No matching preset parameter found. Choose a valid (binStep, baseFactor) combo from the list above.');
   }
 
@@ -282,7 +324,7 @@ async function main() {
   console.log(`    Token Y (SOL):  ${SOL_MINT.toBase58()}`);
   console.log(`    Bin step:       ${BIN_STEP}`);
   console.log(`    Base factor:    ${BASE_FACTOR}`);
-  console.log(`    Base fee:       ${(BIN_STEP * BASE_FACTOR) / 1_000_000 * 100}%`);
+  console.log(`    Base fee:       ${((BIN_STEP * BASE_FACTOR) / 1_000_000).toFixed(2)}%`);
   console.log(`    Active bin ID:  ${activeId}`);
   console.log(`    Preset:         ${matchingPreset.publicKey.toBase58()}`);
   console.log(`    Funder:         ${wallet.publicKey.toBase58()}`);
@@ -294,7 +336,7 @@ async function main() {
     return;
   }
 
-  const createTx = await DLMM.createLbPair(
+  const createTx = await dlmm.createLbPair(
     connection,
     wallet.publicKey,
     BERT_MINT,
@@ -316,7 +358,7 @@ async function main() {
   // Fetch the pool address post-creation
   let poolAddress: PublicKey | null = null;
   try {
-    poolAddress = await DLMM.getPairPubkeyIfExists(
+    poolAddress = await dlmm.getPairPubkeyIfExists(
       connection,
       BERT_MINT,
       SOL_MINT,
@@ -326,7 +368,7 @@ async function main() {
   } catch {
     // Try reverse order
     try {
-      poolAddress = await DLMM.getPairPubkeyIfExists(
+      poolAddress = await dlmm.getPairPubkeyIfExists(
         connection,
         SOL_MINT,
         BERT_MINT,

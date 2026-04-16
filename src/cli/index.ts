@@ -9,6 +9,7 @@ import { runForceRebalance } from './force-rebalance.js';
 import { runReport } from './report.js';
 import { runClearDegraded } from './clear-degraded.js';
 import { runReconcile } from './reconcile.js';
+import { runCloseOrphan } from './close-orphan.js';
 
 const CONFIG_PATH = process.env['BERT_MM_CONFIG'] ?? '/etc/bert-mm-bot/config.yaml';
 
@@ -123,6 +124,19 @@ program
     const { cfg, state } = loadDeps();
     try {
       await runReconcile(cfg, state);
+    } finally {
+      state.close();
+    }
+  });
+
+program
+  .command('close-orphan')
+  .description('Close a position by NFT mint (for orphaned positions not tracked in state)')
+  .requiredOption('--nft <mint>', 'NFT mint address of the orphaned position')
+  .action(async (opts: { nft: string }) => {
+    const { cfg, state } = loadDeps();
+    try {
+      await runCloseOrphan(cfg, state, opts.nft);
     } finally {
       state.close();
     }

@@ -224,3 +224,166 @@ Regardless of the liquidity decision, these should be addressed:
 | **`9LkdXD...` (ours)** | **Raydium** | **CLMM** | **$1,851** | **$519** | **28.0%** |
 
 Our pool actually has a relatively strong volume/TVL ratio (28%) compared to peers. The constraint is absolute volume, not capital efficiency.
+
+Note: `EiPnoq` and `67Wo3U` are Meteora Dynamic AMM (DYN/DYN2) pools, not DLMM. The actual BERT DLMM pools (`EBNa91`, `3yLpLc`, `61HTJPyv`) have <$1K TVL and near-zero volume.
+
+## Appendix C: Meteora DLMM 0.10% Fee Tier Analysis
+
+### Can we create a 0.10% DLMM pool?
+
+**Yes.** Verified against on-chain data and the Meteora DLMM fee formula.
+
+**Formula (from DLMM program `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`):**
+
+```
+base_fee = base_factor × bin_step × 10 / FEE_PRECISION
+FEE_PRECISION = 1,000,000,000
+```
+
+**Verification against existing BERT DLMM pool (`EBNa91...`):**
+
+| Field | On-Chain Value | Source |
+|-------|---------------|--------|
+| base_factor | 10,000 | Solana RPC `getAccountInfo`, offset 8 (u16 LE) |
+| bin_step | 200 | Solana RPC `getAccountInfo`, offset 80 (u16 LE) |
+| protocol_share | 500 (= 5%) | Solana RPC `getAccountInfo`, offset 32 (u16 LE) |
+| variable_fee_control | 7,500 | offset 16 (u32 LE) |
+| max_volatility_accumulator | 150,000 | offset 20 (u32 LE) |
+| **Calculated base fee** | **10,000 × 200 × 10 / 1e9 = 2.00%** | Formula output |
+
+### Configurations that produce 0.10%
+
+Need: `base_factor × bin_step = 100,000`
+
+| bin_step | base_factor | Price Granularity | Bins for 20% Range | Notes |
+|----------|-------------|-------------------|--------------------|-------|
+| 5 | 20,000 | 0.05% | 400 | Very fine — high bin management overhead |
+| 10 | 10,000 | 0.10% | 200 | Fine-grained, standard for major pairs |
+| **20** | **5,000** | **0.20%** | **100** | **Recommended — good balance of granularity and manageability** |
+| 25 | 4,000 | 0.25% | 80 | Moderate |
+| 50 | 2,000 | 0.50% | 40 | Coarse — may miss pricing precision |
+| 100 | 1,000 | 1.00% | 20 | Very coarse — big price gaps between bins |
+
+**Recommended: `bin_step=20, base_factor=5,000`** — 100 bins for a 20% range gives good price granularity (each bin $0.0000212 apart at current BERT price) without excessive bin management complexity.
+
+### Why 0.10% undercuts the competition
+
+| Pool | Fee | Type | How Jupiter evaluates |
+|------|-----|------|-----------------------|
+| Raydium AMM v4 (`BmsZE6`) | 0.25% (fixed) | Constant-product | Deepest ($795K) but higher fee, curve slippage |
+| **Proposed DLMM** | **0.10% base + dynamic** | **Bin-based** | **Lowest fee, zero in-bin slippage, dynamic upside** |
+| Our Raydium CLMM (`9LkdXD`) | 1.00% (fixed) | Concentrated | Higher fee than both competitors |
+| Existing BERT DLMM (`EBNa91`) | 2.00% base + dynamic | Bin-based | Highest fee of all, near-zero liquidity |
+
+Jupiter routes on **best net output** (price after fees and price impact). For a $100 BERT buy:
+
+| Pool | Fee cost | Price impact | Net cost | Jupiter routes here? |
+|------|----------|-------------|----------|---------------------|
+| **Proposed 0.10% DLMM ($2K liq)** | **$0.10** | **~$0 (in-bin)** | **$0.10** | **Yes — cheapest for small trades** |
+| Raydium AMM v4 ($795K liq) | $0.25 | ~$0.01 | $0.26 | Yes — wins on large trades (deeper) |
+| Our CLMM ($1.8K liq) | $1.00 | ~$0.01 | $1.01 | No |
+| Existing DLMM ($714 liq) | $2.00 | ~$0.05 | $2.05 | No |
+
+**At 0.10%, we beat the AMM v4 on trades up to approximately $500-1,000** (where our $2K liquidity starts showing price impact). Above that, the AMM's 400x deeper liquidity wins despite its higher fee. Jupiter will split trades — sending the first $500-1K to us and the rest to the AMM.
+
+### Dynamic fee advantage
+
+Meteora DLMM adds a **variable fee** on top of the base fee that scales with volatility:
+
+```
+variable_fee = A × (volatility_accumulator × bin_step)²
+total_fee = base_fee + variable_fee
+```
+
+When BERT moves sharply (crossing many bins), the variable fee spikes — we automatically earn **more** during the highest-IL periods. On the Raydium CLMM, our 1% fee is fixed regardless of volatility. This is the key structural advantage of DLMM for volatile tokens.
+
+### LP fee share comparison
+
+| Venue | LP Share | On $1 of fees |
+|-------|----------|---------------|
+| Meteora DLMM | **95%** | $0.95 |
+| Raydium CLMM | 88% | $0.88 |
+| Raydium AMM v4 | ~84% | $0.84 |
+
+8% more revenue per dollar of volume vs our current Raydium CLMM.
+
+### Revenue projections: 0.10% DLMM at $2,000
+
+The key question: how much Jupiter-routed volume would we capture?
+
+- Total BERT daily volume: ~$86K across all DEXs
+- Jupiter routes 50-70% of Solana DEX volume: ~$43K-60K BERT/day through Jupiter
+- At 0.10% fee with $2K concentrated at the active bin, we'd win routing on trades up to ~$500-1K
+
+| Volume Captured | Daily LP Fees (0.10% × 95%) | Monthly | Annual | APR on $2K |
+|-----------------|---------------------------|---------|--------|------------|
+| $500/day (1% of Jupiter flow) | $0.48 | $14.25 | $173 | 9% |
+| $2,000/day (4% of Jupiter flow) | $1.90 | $57.00 | $694 | 35% |
+| $5,000/day (10% of Jupiter flow) | $4.75 | $142.50 | $1,733 | 87% |
+| $10,000/day (20% of Jupiter flow) | $9.50 | $285.00 | $3,467 | 173% |
+| $20,000/day (40% of Jupiter flow) | $19.00 | $570.00 | $6,935 | 347% |
+
+**vs current Raydium CLMM at $518/day volume: $2.50/day → $75/month**
+
+The DLMM only matches the CLMM's $75/month at ~$2,600/day captured volume. But the DLMM has:
+- Dynamic fees that increase during volatile periods (exactly when the CLMM is losing to IL)
+- Per-bin control allowing surgical liquidity placement at the active price
+- Zero in-bin slippage making us the cheapest venue for small trades
+- 8% better LP fee share
+
+### Rebalancing in DLMM vs CLMM
+
+| Aspect | Raydium CLMM (current) | Meteora DLMM (proposed) |
+|--------|------------------------|------------------------|
+| Rebalance = full close + reopen? | Yes — atomic close, swap, open | Can add/remove individual bins |
+| Self-slippage on rebalance | Severe at 55% pool share | **Reduced** — can shift bins incrementally |
+| Swap-to-ratio needed? | Yes (50/50 split) | **Depends** — can deposit single-sided into bins |
+| IL crystallization | Every rebalance | Can avoid by adding bins instead of closing |
+| Gas cost per rebalance | ~$0.01-0.04 | ~$0.01-0.05 (similar, slightly more accounts) |
+| Position rent | ~0.002 SOL (refundable) | ~0.25 SOL for bin arrays (higher upfront) |
+
+**The DLMM's per-bin management is the structural fix for the self-slippage problem.** Instead of close-everything-and-reopen, we can:
+1. Remove liquidity from bins that are now out of range
+2. Add liquidity to new bins at the current price
+3. Skip the swap-to-ratio step entirely by depositing single-sided
+
+This fundamentally changes the rebalancing economics at higher position sizes.
+
+### Bot development required
+
+Switching from Raydium CLMM to Meteora DLMM requires:
+
+| Component | Effort | Notes |
+|-----------|--------|-------|
+| Replace `@raydium-io/raydium-sdk-v2` with `@meteora-ag/dlmm` | Medium | Different SDK, different account structures |
+| Rewrite `raydiumClient.ts` → `meteoraClient.ts` | High | New position management (bins vs ticks) |
+| Update `rebalancer.ts` for per-bin operations | High | Can optimize to avoid full close/reopen |
+| Update `strategy.ts` for bin-based range checks | Low | Logic is similar, different data structures |
+| Update `priceOracle.ts` — no change needed | None | Oracle is venue-agnostic |
+| Pool creation (one-time, via Meteora UI) | Low | ~0.25 SOL cost |
+| Testing | Medium | Existing test structure can be adapted |
+
+**Estimated effort: 2-4 days of development + testing.**
+
+### Trade-offs summary
+
+| Factor | Stay on Raydium CLMM 1% | Switch to Meteora DLMM 0.10% |
+|--------|--------------------------|-------------------------------|
+| Fee competitiveness vs AMM v4 | Lose (1% vs 0.25%) | **Win (0.10% vs 0.25%)** |
+| Volume capture potential | Low (only our own pool's $518/day) | **High (could capture Jupiter-routed flow)** |
+| Dynamic fee protection | No | **Yes — fees scale with volatility** |
+| LP fee share | 88% | **95%** |
+| Rebalance flexibility | Close-swap-open (full cycle) | **Per-bin add/remove (incremental)** |
+| Self-slippage at $2K | Severe (55% of pool) | **Reduced (incremental rebalancing)** |
+| Development effort | None (deployed) | 2-4 days |
+| Battle-tested? | Yes (canary running) | No (new code needed) |
+| Revenue per dollar of volume | Higher (1% vs 0.10%) | Lower — but volume should be 10x+ higher |
+| Pool creation cost | None (exists) | ~0.25 SOL (~$38) |
+
+### Data sources for this appendix
+
+- **On-chain pool data:** Solana RPC `getAccountInfo` on `EBNa91ozf31MG9yk2eky3qDtBP3ZLLDqXj1BeMcLob5X`, decoded against DLMM LbPair struct layout
+- **Fee formula:** Meteora DLMM program `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`, verified against on-chain parameters
+- **Jupiter routing:** Jupiter developer docs (Metis routing engine — optimizes for best net output, not lowest fee)
+- **Meteora LP share:** On-chain `protocol_share=500` (5% protocol, 95% LP)
+- **Pool creation:** Meteora docs — permissionless, ~0.25 SOL rent, immutable parameters after creation

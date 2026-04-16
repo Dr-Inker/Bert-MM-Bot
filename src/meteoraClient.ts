@@ -297,7 +297,7 @@ export class MeteoraClientImpl implements VenueClient {
     // Merge all transactions into one
     const merged = new Transaction();
     for (const t of txs) {
-      if (t instanceof Transaction) {
+      if (t instanceof Transaction && t.instructions.length > 0) {
         merged.add(...t.instructions);
       }
     }

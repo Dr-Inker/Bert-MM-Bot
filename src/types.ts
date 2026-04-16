@@ -46,6 +46,7 @@ export type Decision =
   | { kind: 'ALERT_ONLY'; reason: string };
 
 export interface BotConfig {
+  venue: 'raydium' | 'meteora';
   enabled: boolean;
   poolAddress: string;
   bertMint: string;

@@ -1,5 +1,5 @@
 import type { PriceSample } from './priceOracle.js';
-import type { RaydiumClient } from './raydiumClient.js';
+import type { VenueClient } from './venueClient.js';
 import { logger } from './logger.js';
 
 const BERT_MINT = 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump';
@@ -8,7 +8,7 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const BERT_DECIMALS = 6;
 const SOL_DECIMALS = 9;
 
-export function makeFetchers(raydium: RaydiumClient, poolAddress: string) {
+export function makeFetchers(raydium: VenueClient, poolAddress: string) {
   return {
     fetchRaydium: async (): Promise<PriceSample | null> => {
       try {

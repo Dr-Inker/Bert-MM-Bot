@@ -33,6 +33,7 @@ const NotifierSchema = z
 
 const BotConfigSchema = z
   .object({
+    venue: z.enum(['raydium', 'meteora']).default('raydium'),
     enabled: z.boolean(),
     poolAddress: z.string().min(32),
     bertMint: z.string().min(32),

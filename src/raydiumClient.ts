@@ -16,60 +16,21 @@ import BN from 'bn.js';
 import Decimal from 'decimal.js';
 import { logger } from './logger.js';
 import type { PositionSnapshot } from './types.js';
+import type { VenueClient, OpenPositionParams, PoolState } from './venueClient.js';
+
+// Re-export shared types so existing consumers don't break
+export type { VenueClient, OpenPositionParams, PoolState };
+/** @deprecated Use VenueClient instead */
+export type RaydiumClient = VenueClient;
 
 // CLMM program ID for Raydium Concentrated Liquidity
 const CLMM_PROGRAM_ID = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
 
 // Pool-specific constants (confirmed by inspect-pool Stage A)
 const TICK_SPACING = 120;
-const SLIPPAGE_BPS = 100; // 1% slippage tolerance
+const SLIPPAGE_BPS = 300; // 3% slippage tolerance (micro-cap tokens need wider buffer)
 
-export interface OpenPositionParams {
-  lowerUsd: number;
-  upperUsd: number;
-  bertAmountRaw: bigint;
-  solAmountLamports: bigint;
-  /** Trusted oracle SOL/USD price — required for tick conversion. */
-  solUsd: number;
-}
-
-export interface PoolState {
-  address: string;
-  feeTier: number;
-  currentTickIndex: number;
-  sqrtPriceX64: bigint;
-  bertUsd: number;
-  solUsd: number;
-  tvlUsd: number;
-}
-
-export interface RaydiumClient {
-  init(): Promise<void>;
-  getConnection(): Connection;
-  getPoolState(): Promise<PoolState>;
-  /**
-   * Fetch the on-chain position identified by `nftMint`.
-   * `solUsd` is required to convert tick-based price bounds to USD values.
-   * Pass `mid?.solUsd ?? 0` from the orchestrator; a value of 0 yields zero USD bounds.
-   */
-  getPosition(nftMint: string, solUsd: number): Promise<PositionSnapshot | null>;
-  buildOpenPositionTx(params: OpenPositionParams): Promise<{ tx: Transaction; nftMint: string; signers: Signer[] }>;
-  buildClosePositionTx(
-    nftMint: string,
-  ): Promise<{ tx: Transaction; expectedBertOut: bigint; expectedSolOut: bigint }>;
-  buildSwapToRatioTx(params: {
-    haveBertRaw: bigint;
-    haveSolLamports: bigint;
-    targetBertRatio: number;
-  }): Promise<Transaction>;
-  getWalletBalances(): Promise<{ solLamports: bigint; bertRaw: bigint }>;
-  simulateClose(
-    nftMint: string,
-    solUsd: number,
-  ): Promise<{ effectivePriceUsd: number; bertOut: bigint; solOut: bigint }>;
-}
-
-export class RaydiumClientImpl implements RaydiumClient {
+export class RaydiumClientImpl implements VenueClient {
   private connection!: Connection;
   private raydium!: Raydium;
 

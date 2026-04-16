@@ -1,12 +1,12 @@
 import { logger } from './logger.js';
-import type { RaydiumClient } from './raydiumClient.js';
+import type { VenueClient } from './venueClient.js';
 import type { TxSubmitter } from './txSubmitter.js';
 import type { StateStore } from './stateStore.js';
 import type { Notifier } from './notifier.js';
 import type { BotConfig, MidPrice, PositionSnapshot } from './types.js';
 
 export interface RebalancerDeps {
-  raydium: RaydiumClient;
+  raydium: VenueClient;
   submitter: TxSubmitter;
   state: StateStore;
   notifier: Notifier;
@@ -76,7 +76,7 @@ export async function executeRebalance(
   const oldNftMint = currentPosition?.nftMint;
 
   if (currentPosition) {
-    let closeTx: Awaited<ReturnType<RaydiumClient['buildClosePositionTx']>>;
+    let closeTx: Awaited<ReturnType<VenueClient['buildClosePositionTx']>>;
     try {
       closeTx = await raydium.buildClosePositionTx(currentPosition.nftMint);
     } catch (e) {
@@ -239,20 +239,40 @@ export async function executeRebalance(
 
   // ─── Step 9: Persist + notify ────────────────────────────────────────────────
   if (!cfg.dryRun) {
-    state.setCurrentPosition({
-      nftMint: newNftMint,
-      lowerUsd,
-      upperUsd,
-      centerUsd: centerBertUsd,
-      openedAt: now,
-    });
+    try {
+      state.setCurrentPosition({
+        nftMint: newNftMint,
+        lowerUsd,
+        upperUsd,
+        centerUsd: centerBertUsd,
+        openedAt: now,
+      });
 
-    state.recordRebalance({
-      ts: now,
-      oldCenterUsd: currentPosition?.range?.centerBertUsd ?? 0,
-      newCenterUsd: centerBertUsd,
-      feesCollectedUsd: 0, // fees swept separately
-    });
+      state.recordRebalance({
+        ts: now,
+        oldCenterUsd: currentPosition?.range?.centerBertUsd ?? 0,
+        newCenterUsd: centerBertUsd,
+        feesCollectedUsd: 0, // fees swept separately
+      });
+    } catch (e) {
+      // State write failed — close the just-opened position to avoid orphaning it
+      logger.error({ err: e, newNftMint }, 'state persistence failed after open — closing position to prevent orphan');
+      try {
+        const rollbackTx = await raydium.buildClosePositionTx(newNftMint);
+        await submitter.submit(rollbackTx.tx, {
+          priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
+          dryRun: false,
+        });
+        logger.info({ newNftMint }, 'orphan-prevention: position closed after state write failure');
+      } catch (rollbackErr) {
+        logger.fatal({ err: rollbackErr, newNftMint }, 'CRITICAL: state write AND rollback close both failed — ORPHANED POSITION');
+        await notifier.send('CRITICAL', `ORPHANED POSITION ${newNftMint}: state write failed AND rollback close failed. Manual recovery required via: node dist/cli/index.js close-orphan --nft ${newNftMint}`);
+      }
+      const detail = `state persistence failed after open: ${String(e)}`;
+      state.setDegraded(true, detail);
+      await notifier.send('CRITICAL', `Rebalance FAILED (state write): ${detail}. Position rolled back.`);
+      return { kind: 'FAILED', detail };
+    }
   } else {
     logger.info(
       { newNftMint, lowerUsd, upperUsd },

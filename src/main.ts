@@ -6,7 +6,7 @@ import { StateStore } from './stateStore.js';
 import { Notifier } from './notifier.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
-import { RaydiumClientImpl } from './raydiumClient.js';
+import { createVenueClient } from './venueClient.js';
 import { TxSubmitter } from './txSubmitter.js';
 import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
@@ -28,7 +28,8 @@ async function main(): Promise<void> {
   const keyJson = JSON.parse(readFileSync(cfg.keyfilePath, 'utf8')) as number[];
   const payer = Keypair.fromSecretKey(Uint8Array.from(keyJson));
 
-  const raydium = new RaydiumClientImpl(
+  const raydium = await createVenueClient(
+    cfg.venue,
     cfg.rpcPrimary,
     cfg.rpcFallback,
     cfg.poolAddress,
@@ -67,7 +68,7 @@ async function main(): Promise<void> {
   };
 
   const priceHistory: MidPrice[] = [];
-  let lastHourlyReport = -1; // hour of last report (-1 = none sent yet)
+  let lastHourlyReport = new Date().getUTCHours(); // skip immediate report on startup
   let ticksInRange = 0;
   let ticksTotal = 0;
   let rebalancesThisHour = 0;
@@ -175,14 +176,69 @@ async function main(): Promise<void> {
           : 'none';
         const priceInfo = mid ? `$${mid.bertUsd.toFixed(6)}` : 'no oracle';
         const uptimeMin = Math.floor(ticksTotal * cfg.pollIntervalSec / 60);
+
+        // Wallet balances + USD values
+        let balanceLine = '';
+        try {
+          const bal = await raydium.getWalletBalances();
+          const freeSol = Number(bal.solLamports) / 1e9;
+          const freeBert = Number(bal.bertRaw) / 1e6;
+          const solPrice = mid?.solUsd ?? 0;
+          const bertPrice = mid?.bertUsd ?? 0;
+          const freeSolUsd = freeSol * solPrice;
+          const freeBertUsd = freeBert * bertPrice;
+          const freeTotal = freeSolUsd + freeBertUsd;
+          balanceLine = `Wallet: ${freeSol.toFixed(4)} SOL ($${freeSolUsd.toFixed(2)}) + ${freeBert.toFixed(0)} BERT ($${freeBertUsd.toFixed(2)}) = $${freeTotal.toFixed(2)} free`;
+        } catch { balanceLine = 'Wallet: unavailable'; }
+
+        // Position value + fees + total holdings
+        let posValueLine = '';
+        let feeLine = '';
+        let totalLine = '';
+        if (position) {
+          posValueLine = `Position: $${position.totalValueUsd.toFixed(2)} in pool`;
+          const feesBert = Number(position.uncollectedFeesBert) / 1e6;
+          const feesSol = Number(position.uncollectedFeesSol) / 1e9;
+          const feesUsd = feesBert * (mid?.bertUsd ?? 0) + feesSol * (mid?.solUsd ?? 0);
+          feeLine = `Fees: ${feesBert.toFixed(4)} BERT + ${feesSol.toFixed(6)} SOL ($${feesUsd.toFixed(4)})`;
+
+          // Total = free wallet + position + uncollected fees
+          try {
+            const bal = await raydium.getWalletBalances();
+            const freeUsd = (Number(bal.solLamports) / 1e9) * (mid?.solUsd ?? 0) + (Number(bal.bertRaw) / 1e6) * (mid?.bertUsd ?? 0);
+            const totalUsd = freeUsd + position.totalValueUsd + feesUsd;
+            totalLine = `Total holdings: $${totalUsd.toFixed(2)}`;
+          } catch { /* skip */ }
+        }
+
+        // Pool volume from DexScreener
+        let volumeLine = '';
+        try {
+          const dsRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${cfg.bertMint}`);
+          if (dsRes.ok) {
+            const dsData = await dsRes.json() as { pairs: Array<{ pairAddress: string; volume?: { h24?: string; h1?: string } }> };
+            const pool = dsData.pairs?.find((p: { pairAddress: string }) => p.pairAddress === cfg.poolAddress);
+            if (pool?.volume) {
+              const vol24 = Number(pool.volume.h24 ?? 0);
+              const vol1h = Number(pool.volume.h1 ?? 0);
+              volumeLine = `Pool volume: $${vol1h.toFixed(0)}/1h, $${vol24.toFixed(0)}/24h`;
+            }
+          }
+        } catch { /* skip */ }
+
         const lines = [
           `📊 Hourly Status (${new Date(tickStart).toISOString().slice(0, 16)}Z)`,
           `Price: ${priceInfo}`,
           `Range: ${posInfo}`,
           `In-range: ${inRangePct}% (${ticksInRange}/${ticksTotal} ticks, ~${uptimeMin}m)`,
+          balanceLine,
+          posValueLine,
+          feeLine,
+          totalLine,
+          volumeLine,
           `Rebalances today: ${state.getRebalancesToday(tickStart)}/${cfg.maxRebalancesPerDay}`,
           `Status: ${killSwitchTripped ? '🔴 KILLED' : state.isDegraded() ? '🟡 DEGRADED' : '🟢 OK'}`,
-        ];
+        ].filter(Boolean);
         await notifier.send('INFO', lines.join('\n'));
         lastHourlyReport = currentHour;
         ticksInRange = 0;

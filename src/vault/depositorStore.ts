@@ -286,9 +286,11 @@ export class DepositorStore {
 
   // ── Row mappers ───────────────────────────────────────────────────────
   private rowToUser(r: any): VaultUser {
+    // 0 in the DB means 'TOTP secret stored but unconfirmed'; surface as null to callers.
+    const totpEnrolledAt = r.totp_enrolled_at === 0 ? null : r.totp_enrolled_at;
     return {
       telegramId: r.telegram_id, role: r.role, depositAddress: r.deposit_address,
-      totpEnrolledAt: r.totp_enrolled_at, totpLastUsedCounter: r.totp_last_used_counter,
+      totpEnrolledAt, totpLastUsedCounter: r.totp_last_used_counter,
       whitelistAddress: r.whitelist_address, whitelistSetAt: r.whitelist_set_at,
       disclaimerAt: r.disclaimer_at, createdAt: r.created_at,
     };

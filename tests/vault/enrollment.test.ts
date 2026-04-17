@@ -65,4 +65,11 @@ describe('Enrollment', () => {
     const u = store.getUser(5)!;
     expect(u.disclaimerAt).toBe(100);  // unchanged
   });
+
+  it('after beginTotpEnrollment (before confirm), getUser still reports totpEnrolledAt === null', async () => {
+    await enroll.accept({ telegramId: 6, now: 100 });
+    await enroll.beginTotpEnrollment({ telegramId: 6 });
+    const u = store.getUser(6)!;
+    expect(u.totpEnrolledAt).toBeNull();
+  });
 });

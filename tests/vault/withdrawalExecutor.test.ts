@@ -95,6 +95,14 @@ describe('WithdrawalExecutor', () => {
   });
 
   it('fails with reserves_insufficient when partial close not enough', async () => {
+    // User burns 900 shares (of 1000 owned) with BERT component demand that
+    // the vault cannot satisfy: free BERT is 0, position has $1000 of mixed
+    // liquidity, and partialClose is a no-op. After N5 the reserve is
+    // excluded from NAV, so the math is:
+    //   spendableSol = 1e10 - 2e8 = 9.8e9 lamports = 9.8 SOL = $980
+    //   TVL = $980 + $1000 position = $1980; totalShares = 1000 → NAV = 1.98
+    //   usdOwed ≈ 897.3 * 1.98 = $1,777 — needBert far exceeds 0 free BERT
+    //   partialClose no-op → reserves_insufficient
     store.enqueueWithdrawal({
       telegramId: 1, destination: 'DEST',
       sharesBurned: 900, feeShares: 2.7, queuedAt: 150,
@@ -102,8 +110,8 @@ describe('WithdrawalExecutor', () => {
     const exec = new WithdrawalExecutor({
       store,
       getMid: async () => ({ solUsd: 100, bertUsd: 0.01 }),
-      getWalletBalances: async () => ({ solLamports: 300_000_000n, bertRaw: 0n }),
-      getPositionSnapshot: async () => ({ totalValueUsd: 0, solUsdInPosition: 0, bertUsdInPosition: 0 }),
+      getWalletBalances: async () => ({ solLamports: 10_000_000_000n, bertRaw: 0n }),
+      getPositionSnapshot: async () => ({ totalValueUsd: 1000, solUsdInPosition: 0, bertUsdInPosition: 0 }),
       reserveSolLamports: 200_000_000n,
       partialClose: async () => {}, // no-op — won't help
       executeTransfer: async () => ({ txSig: 'sig' }),
@@ -129,14 +137,16 @@ describe('WithdrawalExecutor', () => {
       freeSol: 10_000_000_000n,
       positionUsd: 0,
     });
-    // navPerShare pre-withdrawal: totalUsd = 10 SOL * $100 = $1000, totalShares=2000 → $0.50/share
-    // After: totalShares=1900, totalValueUsd should be (2000 - 99.7) * 0.50 = $950.15
+    // navPerShare pre-withdrawal (N5-corrected):
+    //   spendable = 10 SOL - 0.2 SOL reserve = 9.8 SOL
+    //   TVL = 9.8 * $100 = $980, totalShares=2000 → $0.49/share
+    // After: totalShares=1900, totalValueUsd = (2000 - 99.7) * 0.49 = $931.147
     await exec.drain();
     const snap = store.latestNavSnapshot();
     expect(snap).not.toBeNull();
     expect(snap!.source).toBe('withdrawal');
     expect(snap!.totalShares).toBeCloseTo(1900);  // 2000 - 100
-    expect(snap!.totalValueUsd).toBeCloseTo(950.15);  // (2000 - 99.7) * 0.50
+    expect(snap!.totalValueUsd).toBeCloseTo(931.147);  // (2000 - 99.7) * 0.49
   });
 
   it('drain continues past a row whose processOne throws unexpectedly', async () => {
@@ -237,6 +247,34 @@ describe('WithdrawalExecutor', () => {
     // Shares are still burned? No — completeWithdrawal was the operation that
     // would burn them, and it threw. So shares should be intact.
     expect(store.getShares(1)).toBe(1000);
+  });
+
+  it('N5: excludes reserve SOL from NAV used for withdrawal share math', async () => {
+    // Vault: 1 user, 1000 shares. Free balance = 1 SOL + 0 BERT. Reserve = 0.1 SOL.
+    // Without N5: NAV TVL = 1 SOL * $100 = $100, navPerShare = $0.10/share.
+    //   Burning 100 shares → usdOwed = $10 → needSol = 0.1 SOL (exactly the reserve).
+    // With N5 the reserve is excluded:
+    //   spendable = 0.9 SOL → TVL = $90, navPerShare = $0.09/share.
+    //   Burning 100 shares → usdOwed = $9 → needSol = 0.09 SOL → fits within 0.9 SOL spendable.
+    store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 100, feeShares: 0, queuedAt: 150,
+    });
+    const exec = new WithdrawalExecutor({
+      store,
+      getMid: async () => ({ solUsd: 100, bertUsd: 0.01 }),
+      getWalletBalances: async () => ({ solLamports: 1_000_000_000n, bertRaw: 0n }),
+      getPositionSnapshot: async () => ({ totalValueUsd: 0, solUsdInPosition: 0, bertUsdInPosition: 0 }),
+      reserveSolLamports: 100_000_000n,  // 0.1 SOL
+      partialClose: async () => {},
+      executeTransfer: async () => ({ txSig: 'sig' }),
+      now: () => 200,
+    });
+    await exec.drain();
+    const completed = store.listWithdrawalsByStatus('completed');
+    expect(completed).toHaveLength(1);
+    // navPerShare recorded on completion = 0.09 (N5-corrected, not 0.10)
+    expect(completed[0].navPerShareAt).toBeCloseTo(0.09, 3);
   });
 
   it('N1: second drain pass does not resubmit a row whose tx_sig is populated', async () => {

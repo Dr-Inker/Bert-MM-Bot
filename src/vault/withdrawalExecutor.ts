@@ -71,8 +71,15 @@ export class WithdrawalExecutor {
     const bal = await this.deps.getWalletBalances();
     const pos = await this.deps.getPositionSnapshot();
 
+    // N5: reserved SOL is un-spendable by users (kept for gas + ATA rent) so
+    // it must not be counted as TVL. Subtracting before computing NAV keeps
+    // the math consistent between NAV and the solAvailable check below.
+    const spendableSolLamports =
+      bal.solLamports > this.deps.reserveSolLamports
+        ? bal.solLamports - this.deps.reserveSolLamports
+        : 0n;
     const nav = computeNav({
-      freeSolLamports: bal.solLamports,
+      freeSolLamports: spendableSolLamports,
       freeBertRaw: bal.bertRaw,
       positionTotalValueUsd: pos.totalValueUsd,
       uncollectedFeesBert: 0n,

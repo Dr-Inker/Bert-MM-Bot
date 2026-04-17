@@ -630,11 +630,18 @@ async function main(): Promise<void> {
 
             // Prefer live NAV; fall back to latest snapshot if balance/position
             // fetch fails.
+            // N5: reserved SOL (minSolFloor) is un-spendable by users —
+            // exclude it from the vault's NAV / TVL figure so depositor
+            // balances and /stats reflect withdrawable value only.
             let tvlUsd = 0;
             try {
               const bal = await raydium.getWalletBalances();
+              const reserve = BigInt(cfg.minSolFloorLamports);
+              const spendableSol = bal.solLamports > reserve
+                ? bal.solLamports - reserve
+                : 0n;
               const liveNav = computeNav({
-                freeSolLamports: bal.solLamports,
+                freeSolLamports: spendableSol,
                 freeBertRaw: bal.bertRaw,
                 positionTotalValueUsd: position?.totalValueUsd ?? 0,
                 uncollectedFeesBert: position?.uncollectedFeesBert ?? 0n,

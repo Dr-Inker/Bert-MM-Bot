@@ -7,6 +7,11 @@ import { StateStore } from './stateStore.js';
 import { Notifier } from './notifier.js';
 import { TelegramCommander } from './telegramCommander.js';
 import { DepositorStore } from './vault/depositorStore.js';
+import { Enrollment } from './vault/enrollment.js';
+import { Cooldowns } from './vault/cooldowns.js';
+import { CommandHandlers } from './vault/commands.js';
+import { loadMasterKey } from './vault/encryption.js';
+import { computeNavPerShare } from './vault/shareMath.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -162,6 +167,71 @@ async function main(): Promise<void> {
           '/help — this message',
         ].join('\n'));
       });
+
+      // ─── Vault user-facing commands ─────────────────────────────────────
+      if (cfg.vault?.enabled) {
+        try {
+          const masterKey = loadMasterKey();
+          // NOTE: real ATA creation is deferred to a follow-up task; for now
+          // the enrollment path logs and no-ops. Inbound deposits will still
+          // arrive at the deposit address; the sweeper can create the vault
+          // ATA on first sweep if needed.
+          const ensureAta = async (addr: string): Promise<void> => {
+            logger.info({ depositAddress: addr }, 'vault: ATA creation stub (wire in Task 20)');
+          };
+          const depositorStoreLocal = depositorStore; // re-alias for clarity
+          const enrollment = new Enrollment({
+            store: depositorStoreLocal,
+            masterKey,
+            ensureAta,
+          });
+          const cooldowns = new Cooldowns({
+            store: depositorStoreLocal,
+            cooldownMs: cfg.vault.whitelistCooldownHours * 3600_000,
+          });
+          const getNav = (): { totalUsd: number; totalShares: number } => {
+            const snap = depositorStoreLocal.latestNavSnapshot();
+            const totalShares = depositorStoreLocal.totalShares();
+            if (snap) {
+              return { totalUsd: snap.totalValueUsd, totalShares };
+            }
+            return { totalUsd: 0, totalShares };
+          };
+          const handlers = new CommandHandlers({
+            store: depositorStoreLocal,
+            enrollment,
+            cooldowns,
+            masterKey,
+            reply: (chatId, text) => tgCmd.reply(chatId, text),
+            config: {
+              withdrawalFeeBps: cfg.vault.withdrawalFeeBps,
+              minWithdrawalUsd: cfg.vault.minWithdrawalUsd,
+              maxDailyWithdrawalsPerUser: cfg.vault.maxDailyWithdrawalsPerUser,
+              maxDailyWithdrawalUsdPerUser: cfg.vault.maxDailyWithdrawalUsdPerUser,
+              maxPendingWithdrawals: cfg.vault.maxPendingWithdrawals,
+            },
+            getNav,
+            nowMs: () => Date.now(),
+          });
+
+          tgCmd.registerEnrollmentCommand('account', (msg) => handlers.handleAccount(msg));
+          tgCmd.registerVaultCommand('deposit', (msg) => handlers.handleDeposit(msg));
+          tgCmd.registerVaultCommand('balance', (msg) => handlers.handleBalance(msg));
+          tgCmd.registerVaultCommand('withdraw', (msg) => handlers.handleWithdraw(msg));
+          tgCmd.registerVaultCommand('setwhitelist', (msg) => handlers.handleSetWhitelist(msg));
+          tgCmd.registerVaultCommand('cancelwhitelist', (msg) => handlers.handleCancelWhitelist(msg));
+          tgCmd.registerPublicCommand('stats', (msg) => handlers.handleStats(msg));
+          // Non-command text messages (TOTP replies) route through fallback
+          tgCmd.registerFallback((msg) => handlers.handleMessage(msg));
+          // Touch computeNavPerShare so lint/type-check sees it used if we
+          // add a live-NAV /stats path later; currently /stats uses the
+          // latest snapshot via getNav().
+          void computeNavPerShare;
+          logger.info('vault commands wired into telegram commander');
+        } catch (e) {
+          logger.error({ err: e }, 'vault wiring failed — vault commands disabled');
+        }
+      }
 
       tgCmd.start();
     }

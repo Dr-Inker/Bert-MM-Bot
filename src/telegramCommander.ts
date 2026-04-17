@@ -41,6 +41,7 @@ export class TelegramCommander {
   private readonly operatorChatId: number;
   private readonly depositorStore: DepositorStore;
   private handlers = new Map<string, { kind: Kind; fn: CommandHandler }>();
+  private fallback: CommandHandler | null = null;
 
   constructor(deps: TelegramCommanderDeps) {
     this.botToken = deps.botToken;
@@ -65,12 +66,32 @@ export class TelegramCommander {
   }
 
   /**
+   * Register a fallback handler invoked when the user sends a non-command
+   * plain-text message (no leading `/`). Used by vault commands to consume
+   * TOTP-code replies against a pending action. Only called for users that
+   * have a vault row (registered depositors).
+   */
+  registerFallback(fn: CommandHandler): void {
+    this.fallback = fn;
+  }
+
+  /**
    * Authorize and dispatch a parsed command. Returns silently when the text
    * is not a recognized command or the caller is not authorized.
    */
   async dispatch(msg: IncomingMessage): Promise<void> {
     const match = msg.text.match(/^\/([a-z_]+)(?:\s|$)/i);
-    if (!match || !match[1]) return;
+    if (!match || !match[1]) {
+      // Non-command message: route to fallback if set + user is a registered
+      // depositor. (TOTP replies to pending vault actions.)
+      if (this.fallback) {
+        const user = this.depositorStore.getUser(msg.userId);
+        if (user) {
+          await this.fallback(msg);
+        }
+      }
+      return;
+    }
     const name = match[1].toLowerCase();
     const h = this.handlers.get(name);
     if (!h) return;

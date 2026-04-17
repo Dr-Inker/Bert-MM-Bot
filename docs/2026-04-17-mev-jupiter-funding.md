@@ -13,7 +13,6 @@ Three changes shipped today (commits `2465b82`, `3f7ad89` on `main`):
 
 1. **MEV protection is live.** All three rebalance transactions (close, swap-to-ratio, open) now route through Jito's private block engine when the bot is configured. Public mempool is no longer the primary path. Public-RPC fallback exists so transactions never go missing.
 2. **Our Meteora DLMM pool is already indexed** by DexScreener and visible to Jupiter. It's ignored for routing because the pool is too thin (\~$137 liquidity, quotes ~1000× worse than Raydium). **Indexing was never the blocker — depth is.**
-3. **Profitability at $2K is plausible and testable.** The canary report's -$25 to -$625/month projection used today's $10/day *through our pool* as a static input, but funding to $2K triggers Jupiter routing, which is exactly what changes that input. Corrected math (§4): moderate Jupiter capture = +$200 to +$500/month net. Pessimistic capture = modestly negative. The capture rate is the unknown, so we stage the ramp as a hypothesis test (§4.4) rather than betting $2K blind.
 
 Funding needs to flow from a multi-sig treasury to the bot's hot wallet in capped increments. A single-key $2K hot wallet is an unnecessary concentration of attack surface.
 

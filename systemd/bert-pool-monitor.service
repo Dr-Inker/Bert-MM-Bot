@@ -1,0 +1,18 @@
+[Unit]
+Description=BERT pool monitor — alerts when new pools appear
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=bertmm
+Group=bertmm
+WorkingDirectory=/opt/bert-mm-bot
+ExecStart=/usr/bin/python3 /opt/bert-mm-bot/ops/pool_monitor.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bert-mm-bot
+ProtectHome=true
+StandardOutput=append:/var/log/bert-mm-bot/pool-monitor.log
+StandardError=append:/var/log/bert-mm-bot/pool-monitor.log

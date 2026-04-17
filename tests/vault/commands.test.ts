@@ -119,6 +119,96 @@ describe('CommandHandlers — /account', () => {
   });
 });
 
+describe('CommandHandlers — /accept + /decline enrollment', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('/accept without pending disclaimer replies "no pending action"', async () => {
+    await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/no pending/i);
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.store.getUser(7)).toBeNull();
+  });
+
+  it('/accept with pending disclaimer creates user + begins TOTP setup + sets pending=totp_setup_confirm', async () => {
+    // Seed pending=disclaimer via /account
+    await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('disclaimer');
+    h.reply.mockClear();
+
+    await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    // Base32 secret in the reply + mention of 6-digit code or secret
+    expect(text).toMatch(/[A-Z2-7]{8,}/);
+    expect(text).toMatch(/secret|code/i);
+    expect(h.handlers.pendingFor(7)?.kind).toBe('totp_setup_confirm');
+    expect(h.store.getUser(7)).not.toBeNull();
+    // Audit event disclaimer_accepted is recorded
+    const auditRows = h.store.listAudit({ sinceTs: 0, limit: 50 });
+    expect(auditRows.some((r) => r.event === 'disclaimer_accepted')).toBe(true);
+  });
+
+  it('after /accept, a valid TOTP code confirms enrollment + emits totp_enrolled audit event', async () => {
+    await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+    await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('totp_setup_confirm');
+    // Recover the secret we just set up (it's stored encrypted by beginTotpEnrollment)
+    const secrets = h.store.getUserSecrets(7)!;
+    const { decrypt } = await import('../../src/vault/encryption.js');
+    const secretBase32 = decrypt(secrets.totpSecretEnc!, secrets.totpSecretIv!, MASTER_KEY).toString('utf8');
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secretBase32);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/2FA confirmed|\/deposit/i);
+    // totp_enrolled audit event recorded
+    const auditRows = h.store.listAudit({ sinceTs: 0, limit: 50 });
+    expect(auditRows.some((r) => r.event === 'totp_enrolled')).toBe(true);
+    // totpEnrolledAt is now set
+    const user = h.store.getUser(7)!;
+    expect(user.totpEnrolledAt).not.toBeNull();
+  });
+
+  it('after /accept, an invalid TOTP code keeps pending and emits totp_verify_failed', async () => {
+    await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+    await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+    h.reply.mockClear();
+
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/invalid/i);
+    // Still pending — user can retry
+    expect(h.handlers.pendingFor(7)?.kind).toBe('totp_setup_confirm');
+    const auditRows = h.store.listAudit({ sinceTs: 0, limit: 50 });
+    expect(auditRows.some((r) => r.event === 'totp_verify_failed')).toBe(true);
+  });
+
+  it('/decline with pending disclaimer clears pending and does not create user', async () => {
+    await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('disclaimer');
+    h.reply.mockClear();
+
+    await h.handlers.handleDecline({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/cancel/i);
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.store.getUser(7)).toBeNull();
+  });
+});
+
 describe('CommandHandlers — /deposit', () => {
   let h: Harness;
   beforeEach(() => { h = buildHarness(); });
@@ -390,6 +480,66 @@ describe('CommandHandlers — /withdraw', () => {
     expect(queued[0]!.sharesBurned).toBeCloseTo(50, 2);
     // feeShares at 30 bps = 0.3% of 50 = 0.15
     expect(queued[0]!.feeShares).toBeCloseTo(0.15, 3);
+  });
+
+  it('refuses withdrawal when daily USD cap would be exceeded', async () => {
+    // Build a dedicated harness with a lower maxDailyWithdrawalUsdPerUser cap
+    const dir = mkdtempSync(join(tmpdir(), 'bertmm-cmd-cap-'));
+    const state = new StateStore(join(dir, 'state.db'));
+    state.init();
+    const store = new DepositorStore(state);
+    const enrollment = new Enrollment({ store, masterKey: MASTER_KEY, ensureAta: async () => {} });
+    const cooldowns = new Cooldowns({ store, cooldownMs: 24 * 3600 * 1000 });
+    const reply = vi.fn(async () => {});
+    const navProvider = { totalUsd: 2000, totalShares: 1000 }; // navPerShare=2
+    const nowRef = { current: 1_000_000 };
+    const handlers = new CommandHandlers({
+      store, enrollment, cooldowns, masterKey: MASTER_KEY, reply,
+      config: {
+        withdrawalFeeBps: 30,
+        minWithdrawalUsd: 10,
+        maxDailyWithdrawalsPerUser: 10,
+        maxDailyWithdrawalUsdPerUser: 500,
+        maxPendingWithdrawals: 20,
+      },
+      getNav: () => navProvider,
+      nowMs: () => nowRef.current,
+    });
+    try {
+      // Enroll user 1 fully (mirrors enrollFully but on this local harness)
+      await enrollment.accept({ telegramId: 1, now: 100 });
+      const { secretBase32 } = await enrollment.beginTotpEnrollment({ telegramId: 1 });
+      const { TOTP } = await import('otpauth');
+      const code = new TOTP({ secret: secretBase32 }).generate();
+      const ok = await enrollment.confirmTotp({ telegramId: 1, code, now: 101 });
+      if (!ok) throw new Error('confirmTotp failed');
+
+      store.setWhitelistImmediate({ telegramId: 1, address: DEST, ts: 150 });
+      store.addShares(1, 2000);
+      // Pre-seed ~$400 of completed withdrawals in last 24h.
+      // 400 shares at navPerShareAt=1.0 → (400 - 1.2) * 1 = $398.8
+      const wid = store.enqueueWithdrawal({
+        telegramId: 1, destination: DEST, sharesBurned: 400, feeShares: 1.2, queuedAt: 150,
+      });
+      store.setWithdrawalProcessing(wid);
+      store.completeWithdrawal({
+        id: wid, txSig: 'prev',
+        solLamportsOut: 4_000_000_000n, bertRawOut: 0n,
+        navPerShareAt: 1.0, processedAt: 160,
+      });
+
+      // Request $200 → would push total to ~$598.8, exceeding $500 cap.
+      await handlers.handleWithdraw({ chatId: 1, userId: 1, text: '/withdraw 200' });
+
+      // Rejection — no pending, no new withdrawal queued
+      expect(handlers.pendingFor(1)).toBeUndefined();
+      expect(store.countPendingWithdrawals()).toBe(0);
+      const lastReply = reply.mock.calls.at(-1)?.[1] ?? '';
+      expect(lastReply).toMatch(/daily.*cap|limit/i);
+    } finally {
+      state.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('percent syntax: 50% of user balance', async () => {

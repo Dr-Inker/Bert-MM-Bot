@@ -11,7 +11,6 @@ import { Enrollment } from './vault/enrollment.js';
 import { Cooldowns } from './vault/cooldowns.js';
 import { CommandHandlers } from './vault/commands.js';
 import { loadMasterKey } from './vault/encryption.js';
-import { computeNavPerShare } from './vault/shareMath.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -215,6 +214,8 @@ async function main(): Promise<void> {
           });
 
           tgCmd.registerEnrollmentCommand('account', (msg) => handlers.handleAccount(msg));
+          tgCmd.registerEnrollmentCommand('accept', (msg) => handlers.handleAccept(msg));
+          tgCmd.registerEnrollmentCommand('decline', (msg) => handlers.handleDecline(msg));
           tgCmd.registerVaultCommand('deposit', (msg) => handlers.handleDeposit(msg));
           tgCmd.registerVaultCommand('balance', (msg) => handlers.handleBalance(msg));
           tgCmd.registerVaultCommand('withdraw', (msg) => handlers.handleWithdraw(msg));
@@ -223,10 +224,6 @@ async function main(): Promise<void> {
           tgCmd.registerPublicCommand('stats', (msg) => handlers.handleStats(msg));
           // Non-command text messages (TOTP replies) route through fallback
           tgCmd.registerFallback((msg) => handlers.handleMessage(msg));
-          // Touch computeNavPerShare so lint/type-check sees it used if we
-          // add a live-NAV /stats path later; currently /stats uses the
-          // latest snapshot via getNav().
-          void computeNavPerShare;
           logger.info('vault commands wired into telegram commander');
         } catch (e) {
           logger.error({ err: e }, 'vault wiring failed — vault commands disabled');

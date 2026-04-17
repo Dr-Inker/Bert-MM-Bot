@@ -50,8 +50,14 @@ export type PendingAction =
   | { kind: 'setwhitelist_change'; address: string }
   | { kind: 'cancelwhitelist' };
 
+/** Maximum consecutive invalid TOTP codes during enrollment confirm before we
+ *  clear pending and tell the user to start over via /account. Prevents a
+ *  stuck session and (very lightly) raises the cost of brute-forcing. */
+const TOTP_SETUP_MAX_FAILURES = 5;
+
 export class CommandHandlers {
   private pending = new Map<number, PendingAction>();
+  private totpSetupFailures = new Map<number, number>();
   private audit: AuditLog;
 
   constructor(private deps: CommandsDeps) {
@@ -97,6 +103,44 @@ export class CommandHandlers {
     );
   }
 
+  // ── /accept (disclaimer) ──────────────────────────────────────────────
+  /**
+   * Consumes a pending 'disclaimer' action: creates the user's deposit
+   * keypair, begins TOTP enrollment, and shows the Base32 secret. The user's
+   * next plain-text reply (expected: a 6-digit code) then confirms TOTP via
+   * handleMessage's 'totp_setup_confirm' branch.
+   */
+  async handleAccept(msg: { chatId: number; userId: number }): Promise<void> {
+    const pending = this.pending.get(msg.userId);
+    if (!pending || pending.kind !== 'disclaimer') {
+      await this.deps.reply(msg.chatId, 'No pending action. Use /account to start.');
+      return;
+    }
+    this.pending.delete(msg.userId);
+    const now = this.deps.nowMs();
+    await this.deps.enrollment.accept({ telegramId: msg.userId, now });
+    this.audit.write({ ts: now, telegramId: msg.userId, event: 'disclaimer_accepted' });
+    const { secretBase32 } = await this.deps.enrollment.beginTotpEnrollment({
+      telegramId: msg.userId,
+    });
+    this.pending.set(msg.userId, { kind: 'totp_setup_confirm' });
+    this.totpSetupFailures.delete(msg.userId);
+    await this.deps.reply(
+      msg.chatId,
+      `Set up 2FA in Google Authenticator (or Authy).\n` +
+        `Add a TOTP account with this text secret:\n\n` +
+        `${secretBase32}\n\n` +
+        `Then reply with the current 6-digit code to confirm.`,
+    );
+  }
+
+  // ── /decline (disclaimer) ─────────────────────────────────────────────
+  async handleDecline(msg: { chatId: number; userId: number }): Promise<void> {
+    this.pending.delete(msg.userId);
+    this.totpSetupFailures.delete(msg.userId);
+    await this.deps.reply(msg.chatId, 'Cancelled. Use /account any time to reconsider.');
+  }
+
   // ── /deposit ───────────────────────────────────────────────────────────
   async handleDeposit(msg: { chatId: number; userId: number }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
@@ -134,11 +178,55 @@ export class CommandHandlers {
       case 'withdraw':
         await this.respondWithdraw(msg, pending);
         return;
+      case 'totp_setup_confirm':
+        await this.respondTotpSetupConfirm(msg);
+        return;
+      case 'disclaimer':
+        // Disclaimer is consumed via /accept or /decline commands, not a
+        // free-text reply. Drop any plain-text message and keep pending so
+        // the user still gets a chance to /accept.
+        return;
       default:
         // Other branches wired in later sub-steps. Drop the pending entry to
         // avoid leaking state if we hit an unhandled branch in dev.
         return;
     }
+  }
+
+  private async respondTotpSetupConfirm(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    const code = msg.text.trim();
+    const now = this.deps.nowMs();
+    const ok = await this.deps.enrollment.confirmTotp({
+      telegramId: msg.userId, code, now,
+    });
+    if (ok) {
+      this.pending.delete(msg.userId);
+      this.totpSetupFailures.delete(msg.userId);
+      this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
+      await this.deps.reply(
+        msg.chatId,
+        '2FA confirmed. /deposit /balance /withdraw /setwhitelist /stats',
+      );
+      return;
+    }
+    const failures = (this.totpSetupFailures.get(msg.userId) ?? 0) + 1;
+    this.audit.write({
+      ts: now, telegramId: msg.userId,
+      event: 'totp_verify_failed', details: { op: 'totp_setup_confirm', failures },
+    });
+    if (failures >= TOTP_SETUP_MAX_FAILURES) {
+      this.pending.delete(msg.userId);
+      this.totpSetupFailures.delete(msg.userId);
+      await this.deps.reply(
+        msg.chatId,
+        `Too many invalid codes. Start over via /account.`,
+      );
+      return;
+    }
+    this.totpSetupFailures.set(msg.userId, failures);
+    await this.deps.reply(msg.chatId, 'Invalid code. Try again.');
   }
 
   /**

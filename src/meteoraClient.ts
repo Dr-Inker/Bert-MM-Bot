@@ -336,10 +336,16 @@ export class MeteoraClientImpl implements VenueClient {
    * To free SOL, we remove from bins holding SOL; to free BERT we remove
    * from bins holding BERT. The caller may request either or both.
    *
-   * MVP simplification: we remove 100% of each selected bin (bps=10_000) and
-   * pass a contiguous [fromBinId, toBinId] range spanning the chosen bins.
-   * Overshooting is explicitly OK — any surplus remains in the wallet and is
-   * still available for whatever the caller needs next.
+   * Implementation: we issue a separate removeLiquidity call per side (SOL side
+   * and/or BERT side). Each side's call passes the contiguous min..max range
+   * spanning that side's selected bins, with bps=10_000 (100% of each bin in
+   * range). Splitting is required because a single min..max range covering
+   * both sides would span the active bin and any intermediate bins on the
+   * opposite side, causing a full position drain rather than a partial close.
+   *
+   * The active bin (mixed) is never included because side-selection filters
+   * use strict `<` / `>`. Overshooting within a side is explicitly OK —
+   * surplus remains in the wallet for the caller's next use.
    */
   async buildPartialCloseTx(args: {
     positionId: string;
@@ -384,34 +390,53 @@ export class MeteoraClientImpl implements VenueClient {
     const solAmountField = this.bertIsX ? 'positionYAmount' : 'positionXAmount';
     const bertAmountField = this.bertIsX ? 'positionXAmount' : 'positionYAmount';
 
-    const toRemove = new Set<number>();
-
+    // Build per-side selections. Each side's bins are sorted nearest-active
+    // first, so selecting prefix bins yields a contiguous range in practice.
+    const solSide: number[] = [];
     if (args.needSolLamports > 0n) {
       let collected = 0n;
       for (const b of solBins) {
         if (collected >= args.needSolLamports) break;
-        toRemove.add(b.binId);
+        solSide.push(b.binId);
         collected += BigInt(b[solAmountField].toString());
       }
     }
 
+    const bertSide: number[] = [];
     if (args.needBertRaw > 0n) {
       let collected = 0n;
       for (const b of bertBins) {
         if (collected >= args.needBertRaw) break;
-        toRemove.add(b.binId);
+        bertSide.push(b.binId);
         collected += BigInt(b[bertAmountField].toString());
       }
     }
 
-    if (toRemove.size === 0) {
+    if (solSide.length === 0 && bertSide.length === 0) {
       throw new Error(
         'buildPartialCloseTx: no bins selected (need amounts may be 0 or position has no eligible bins)',
       );
     }
 
-    const fromBinId = Math.min(...toRemove);
-    const toBinId = Math.max(...toRemove);
+    // Assemble side ranges to remove. Each non-empty side becomes one
+    // removeLiquidity call with its own contiguous [min, max] range. Because
+    // both strict `<` and `>` filters exclude the active bin, no side's range
+    // will include the mixed active bin.
+    const sideRanges: Array<{ label: 'sol' | 'bert'; fromBinId: number; toBinId: number }> = [];
+    if (solSide.length > 0) {
+      sideRanges.push({
+        label: 'sol',
+        fromBinId: Math.min(...solSide),
+        toBinId: Math.max(...solSide),
+      });
+    }
+    if (bertSide.length > 0) {
+      sideRanges.push({
+        label: 'bert',
+        fromBinId: Math.min(...bertSide),
+        toBinId: Math.max(...bertSide),
+      });
+    }
 
     logger.info(
       {
@@ -419,30 +444,37 @@ export class MeteoraClientImpl implements VenueClient {
         activeBin,
         needSolLamports: args.needSolLamports.toString(),
         needBertRaw: args.needBertRaw.toString(),
-        fromBinId,
-        toBinId,
-        binsSelected: toRemove.size,
+        sideRanges: sideRanges.map((s) => ({
+          label: s.label,
+          fromBinId: s.fromBinId,
+          toBinId: s.toBinId,
+        })),
+        solBinsSelected: solSide.length,
+        bertBinsSelected: bertSide.length,
       },
-      'buildPartialCloseTx: removing targeted bins',
+      'buildPartialCloseTx: removing targeted bins per side',
     );
 
-    // removeLiquidity returns Transaction[]; merge to a single Transaction to
-    // match the rest of the venue-client convention.
-    const txs = await this.dlmmPool.removeLiquidity({
-      user: this.payer.publicKey,
-      position: pos.publicKey,
-      fromBinId,
-      toBinId,
-      bps: FULL_BPS, // 100% of each selected bin
-      shouldClaimAndClose: false,
-    });
-
+    // Issue one removeLiquidity call per side, merging all returned txs'
+    // instructions into a single Transaction. This mirrors buildClosePositionTx.
     const merged = new Transaction();
-    for (const t of txs) {
-      if (t instanceof Transaction && t.instructions.length > 0) {
-        merged.add(...t.instructions);
+    for (const side of sideRanges) {
+      const txs = await this.dlmmPool.removeLiquidity({
+        user: this.payer.publicKey,
+        position: pos.publicKey,
+        fromBinId: side.fromBinId,
+        toBinId: side.toBinId,
+        bps: FULL_BPS, // 100% of each bin in this side's range
+        shouldClaimAndClose: false,
+      });
+
+      for (const t of txs) {
+        if (t instanceof Transaction && t.instructions.length > 0) {
+          merged.add(...t.instructions);
+        }
       }
     }
+
     return merged;
   }
 

@@ -119,16 +119,34 @@ async function main(): Promise<void> {
   }
   let vaultRuntime: VaultRuntime | null = null;
 
+  // N3: If the vault is enabled, require an explicit operator user id so
+  // operator-auth cannot silently fall back to the notifier chat id.
+  if (cfg.vault?.enabled && !cfg.vault.operatorTelegramId) {
+    throw new Error(
+      'vault.enabled=true but vault.operatorTelegramId is missing — refusing to start',
+    );
+  }
+
   // Start Telegram command listener (if configured)
   if (cfg.notifier?.telegram) {
     const depositorStore = new DepositorStore(state);
-    const operatorChatId = Number(cfg.notifier.telegram.chatIdInfo);
-    if (!Number.isFinite(operatorChatId)) {
-      logger.warn({ chatIdInfo: cfg.notifier.telegram.chatIdInfo }, 'telegram operator chat id is not numeric; telegram commander disabled');
+    // N3: operator auth is by user id. Prefer vault.operatorTelegramId when
+    // the vault is enabled (that's the canonical operator identity). When
+    // the vault is off, fall back to notifier.telegram.chatIdInfo so existing
+    // MM bot /pause /resume /status commands keep working in private DMs
+    // (where userId === chatId).
+    const operatorUserId = cfg.vault?.enabled
+      ? cfg.vault.operatorTelegramId
+      : Number(cfg.notifier.telegram.chatIdInfo);
+    if (!Number.isFinite(operatorUserId)) {
+      logger.warn(
+        { source: cfg.vault?.enabled ? 'vault.operatorTelegramId' : 'notifier.telegram.chatIdInfo' },
+        'telegram operator user id is not numeric; telegram commander disabled',
+      );
     } else {
       const tgCmd = new TelegramCommander({
         botToken: cfg.notifier.telegram.botToken,
-        operatorChatId,
+        operatorUserId,
         depositorStore,
       });
 
@@ -386,7 +404,7 @@ async function main(): Promise<void> {
           // Non-command text messages (TOTP replies) route through fallback
           tgCmd.registerFallback((msg) => handlers.handleMessage(msg));
 
-          // Operator-only vault commands (gated by operatorChatId in TelegramCommander)
+          // Operator-only vault commands (gated by operatorUserId in TelegramCommander)
           const operatorHandlers = new OperatorCommandHandlers({
             store: depositorStoreLocal,
             state,

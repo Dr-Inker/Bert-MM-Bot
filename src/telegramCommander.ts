@@ -20,7 +20,17 @@ type Kind = 'operator' | 'vault' | 'public' | 'enrollment';
 
 export interface TelegramCommanderDeps {
   botToken: string;
-  operatorChatId: number;
+  /**
+   * Telegram **user id** of the operator. Commands of kind 'operator' are
+   * authorized by `msg.userId === operatorUserId`, which works in both
+   * private DMs (userId == chatId) and group chats (userId !== chatId).
+   *
+   * When the vault is enabled, main.ts sources this from
+   * `cfg.vault.operatorTelegramId`. When only the MM bot is running, it
+   * falls back to `cfg.notifier.telegram.chatIdInfo` (which for private-DM
+   * deployments is the same as the operator's user id).
+   */
+  operatorUserId: number;
   depositorStore: DepositorStore;
 }
 
@@ -29,7 +39,7 @@ export interface TelegramCommanderDeps {
  * dispatches to handlers registered on a command registry.
  *
  * Authorization kinds:
- *  - operator:   requires chatId === operatorChatId
+ *  - operator:   requires userId === operatorUserId
  *  - vault:      requires depositorStore.getUser(userId) exists
  *  - public:     anyone
  *  - enrollment: anyone (e.g. /account, the enrollment entry point)
@@ -38,14 +48,14 @@ export class TelegramCommander {
   private offset = 0;
   private running = false;
   private readonly botToken: string;
-  private readonly operatorChatId: number;
+  private readonly operatorUserId: number;
   private readonly depositorStore: DepositorStore;
   private handlers = new Map<string, { kind: Kind; fn: CommandHandler }>();
   private fallback: CommandHandler | null = null;
 
   constructor(deps: TelegramCommanderDeps) {
     this.botToken = deps.botToken;
-    this.operatorChatId = deps.operatorChatId;
+    this.operatorUserId = deps.operatorUserId;
     this.depositorStore = deps.depositorStore;
   }
 
@@ -102,10 +112,16 @@ export class TelegramCommander {
         await h.fn(msg);
         return;
       case 'operator':
-        if (msg.chatId === this.operatorChatId) {
+        // N3: authorize on user id, not chat id. Works in private DMs and in
+        // group chats (where chatId is the group's negative id but userId is
+        // still the sender). Aligns with how vault commands authenticate.
+        if (msg.userId === this.operatorUserId) {
           await h.fn(msg);
         } else {
-          logger.warn({ chatId: msg.chatId, cmd: name }, 'telegram operator command from unauthorized chat');
+          logger.warn(
+            { chatId: msg.chatId, userId: msg.userId, cmd: name },
+            'telegram operator command from unauthorized user',
+          );
         }
         return;
       case 'vault': {

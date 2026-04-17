@@ -40,8 +40,8 @@ export function buildSweepInstructions(p: SweepParams): TransactionInstruction[]
   }
 
   if (p.bertRaw > 0n) {
-    const fromAta = getAssociatedTokenAddressSync(p.bertMint, p.fromKeypair.publicKey, true);
-    const toAta = getAssociatedTokenAddressSync(p.bertMint, p.toWallet, true);
+    const fromAta = getAssociatedTokenAddressSync(p.bertMint, p.fromKeypair.publicKey, false);
+    const toAta = getAssociatedTokenAddressSync(p.bertMint, p.toWallet, false);
     ixs.push(createTransferCheckedInstruction(
       fromAta, p.bertMint, toAta, p.fromKeypair.publicKey,
       p.bertRaw, BERT_DECIMALS,

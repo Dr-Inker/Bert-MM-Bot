@@ -5,6 +5,7 @@ import { DISCLAIMER_TEXT } from './disclaimer.js';
 import { AuditLog } from './audit.js';
 import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
+import { computeNavPerShare, usdForShares } from './shareMath.js';
 
 export interface ReplyFn {
   (chatId: number, text: string, extras?: { photoBase64?: string }): Promise<void>;
@@ -119,6 +120,9 @@ export class CommandHandlers {
       case 'deposit_reveal':
         await this.respondDepositReveal(msg);
         return;
+      case 'balance_reveal':
+        await this.respondBalanceReveal(msg);
+        return;
       default:
         // Other branches wired in later sub-steps. Drop the pending entry to
         // avoid leaking state if we hit an unhandled branch in dev.
@@ -149,6 +153,42 @@ export class CommandHandlers {
     if (!r.ok) return { ok: false };
     this.deps.store.setTotpLastCounter(userId, r.counter);
     return { ok: true };
+  }
+
+  // ── /balance ───────────────────────────────────────────────────────────
+  async handleBalance(msg: { chatId: number; userId: number }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      return;
+    }
+    this.pending.set(msg.userId, { kind: 'balance_reveal' });
+    await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to view your balance.');
+  }
+
+  private async respondBalanceReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {
+    this.pending.delete(msg.userId);
+    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    if (!v.ok) {
+      this.audit.write({
+        ts: this.deps.nowMs(), telegramId: msg.userId,
+        event: 'totp_verify_failed', details: { op: 'balance_reveal' },
+      });
+      await this.deps.reply(msg.chatId, '2FA code invalid. Try /balance again.');
+      return;
+    }
+    const shares = this.deps.store.getShares(msg.userId);
+    const nav = this.deps.getNav();
+    const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
+    const usd = usdForShares({ netShares: shares, navPerShare });
+    this.audit.write({
+      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'balance_reveal',
+      details: { shares, navPerShare, usd },
+    });
+    await this.deps.reply(
+      msg.chatId,
+      `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
+    );
   }
 
   private async respondDepositReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {

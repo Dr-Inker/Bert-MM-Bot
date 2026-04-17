@@ -164,3 +164,53 @@ describe('CommandHandlers — /deposit', () => {
     expect(h.handlers.pendingFor(7)).toBeUndefined();
   });
 });
+
+describe('CommandHandlers — /balance', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('not enrolled: instructs user to enroll', async () => {
+    await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/\/account/i);
+  });
+
+  it('enrolled + valid code: shows shares + USD value', async () => {
+    const secret = await enrollFully(h, 7);
+    // Seed 100 shares, NAV total $200 → navPerShare = 2 → user value $200
+    h.store.addShares(7, 100);
+    h.navProvider.totalUsd = 200;
+    h.navProvider.totalShares = 100;
+
+    await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('balance_reveal');
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/100(\.00)?\s*shares/i);
+    expect(text).toMatch(/\$200(\.00)?/);
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+  });
+
+  it('enrolled + bad code: rejects', async () => {
+    await enrollFully(h, 7);
+    h.store.addShares(7, 50);
+    h.navProvider.totalUsd = 100;
+    h.navProvider.totalShares = 50;
+
+    await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+    h.reply.mockClear();
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/invalid|failed/i);
+  });
+});

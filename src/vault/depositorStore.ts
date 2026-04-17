@@ -185,6 +185,30 @@ export class DepositorStore {
       .all(status) as any[]).map(r => this.rowToWithdrawal(r));
   }
 
+  getWithdrawalById(id: number): VaultWithdrawal | null {
+    const row = this.db.prepare(`SELECT * FROM vault_withdrawals WHERE id=?`).get(id) as any;
+    return row ? this.rowToWithdrawal(row) : null;
+  }
+
+  /**
+   * Reset a failed withdrawal back to 'queued' so the next drain retries it.
+   * Clears failure_reason and processed_at. Throws if the id is missing or the
+   * withdrawal is not currently in 'failed' status.
+   */
+  requeueFailedWithdrawal(id: number): void {
+    const row = this.db.prepare(`SELECT status FROM vault_withdrawals WHERE id=?`)
+      .get(id) as { status: string } | undefined;
+    if (!row) throw new Error(`requeueFailedWithdrawal: id ${id} not found`);
+    if (row.status !== 'failed') {
+      throw new Error(`requeueFailedWithdrawal: id ${id} is in status '${row.status}', not 'failed'`);
+    }
+    this.db.prepare(`
+      UPDATE vault_withdrawals
+      SET status='queued', failure_reason=NULL, processed_at=NULL
+      WHERE id=?
+    `).run(id);
+  }
+
   /** Sum USD value delivered (net of fee) for completed withdrawals in last 24h. */
   sumCompletedWithdrawalUsdLast24h(telegramId: number, nowMs: number): number {
     const since = nowMs - 24 * 3600 * 1000;
@@ -278,6 +302,14 @@ export class DepositorStore {
       .run(reason, id);
   }
 
+  /** Count all whitelist changes currently in 'pending' status (across users). */
+  countPendingWhitelistChanges(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM vault_pending_whitelist_changes WHERE status='pending'`,
+    ).get() as { n: number };
+    return row.n;
+  }
+
   // ── NAV snapshots ─────────────────────────────────────────────────────
   insertNavSnapshot(row: NavSnapshotRow): void {
     this.db.prepare(`
@@ -317,6 +349,15 @@ export class DepositorStore {
   listAudit(args: { sinceTs: number; limit: number }): Array<{ ts: number; telegramId: number | null; event: string; detailsJson: string }> {
     return (this.db.prepare(`SELECT * FROM vault_audit_log WHERE ts>=? ORDER BY ts DESC LIMIT ?`)
       .all(args.sinceTs, args.limit) as any[])
+      .map(r => ({ ts: r.ts, telegramId: r.telegram_id, event: r.event, detailsJson: r.details_json }));
+  }
+
+  /** Most recent N audit events across all users, newest first. */
+  listRecentAuditEvents(
+    limit: number,
+  ): Array<{ ts: number; telegramId: number | null; event: string; detailsJson: string }> {
+    return (this.db.prepare(`SELECT * FROM vault_audit_log ORDER BY ts DESC, id DESC LIMIT ?`)
+      .all(limit) as any[])
       .map(r => ({ ts: r.ts, telegramId: r.telegram_id, event: r.event, detailsJson: r.details_json }));
   }
 

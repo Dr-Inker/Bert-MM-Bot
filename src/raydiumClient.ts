@@ -402,6 +402,16 @@ export class RaydiumClientImpl implements VenueClient {
     return { tx, expectedBertOut, expectedSolOut };
   }
 
+  async buildPartialCloseTx(_args: {
+    positionId: string;
+    needSolLamports: bigint;
+    needBertRaw: bigint;
+  }): Promise<Transaction> {
+    throw new Error(
+      'UNIMPLEMENTED: partialClose not supported on Raydium client (MVP is Meteora-only)',
+    );
+  }
+
   async simulateClose(
     nftMint: string,
     solUsd: number,

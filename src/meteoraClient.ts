@@ -324,6 +324,128 @@ export class MeteoraClientImpl implements VenueClient {
     return { tx: merged, expectedBertOut, expectedSolOut };
   }
 
+  /**
+   * Remove liquidity from targeted bins to free up approximately the requested
+   * amounts of SOL and/or BERT.
+   *
+   * Bin classification in Meteora DLMM (token Y per token X pricing):
+   *   - bins with binId < activeBin hold only tokenY
+   *   - bins with binId > activeBin hold only tokenX
+   *   - the active bin is mixed
+   *
+   * To free SOL, we remove from bins holding SOL; to free BERT we remove
+   * from bins holding BERT. The caller may request either or both.
+   *
+   * MVP simplification: we remove 100% of each selected bin (bps=10_000) and
+   * pass a contiguous [fromBinId, toBinId] range spanning the chosen bins.
+   * Overshooting is explicitly OK — any surplus remains in the wallet and is
+   * still available for whatever the caller needs next.
+   */
+  async buildPartialCloseTx(args: {
+    positionId: string;
+    needSolLamports: bigint;
+    needBertRaw: bigint;
+  }): Promise<Transaction> {
+    if (!this.payer) {
+      throw new Error('buildPartialCloseTx requires payer');
+    }
+
+    await this.dlmmPool.refetchStates();
+
+    const { userPositions } = await this.dlmmPool.getPositionsByUserAndLbPair(
+      this.payer.publicKey,
+    );
+    const pos = userPositions.find(
+      (p: any) => p.publicKey.toBase58() === args.positionId,
+    );
+    if (!pos) {
+      throw new Error(`buildPartialCloseTx: position ${args.positionId} not found`);
+    }
+
+    const activeBin = (await this.dlmmPool.getActiveBin()).binId;
+    const binData: Array<any> = pos.positionData.positionBinData;
+
+    // Classify bins relative to active. The Y side holds the quote token, X
+    // holds the base token. "solBins" = bins that hold SOL; "bertBins" = bins
+    // that hold BERT.
+    const binsBelow = binData
+      .filter((b) => b.binId < activeBin)
+      .sort((a, b) => b.binId - a.binId); // nearest (closest to active) first
+    const binsAbove = binData
+      .filter((b) => b.binId > activeBin)
+      .sort((a, b) => a.binId - b.binId); // nearest first
+
+    // When BERT is tokenX, below-active bins hold tokenY = SOL, above-active
+    // bins hold tokenX = BERT. When BERT is tokenY, the mapping inverts.
+    const solBins = this.bertIsX ? binsBelow : binsAbove;
+    const bertBins = this.bertIsX ? binsAbove : binsBelow;
+    // When BERT=X: SOL amount in a bin is positionYAmount, BERT is positionXAmount
+    // When BERT=Y: SOL amount in a bin is positionXAmount, BERT is positionYAmount
+    const solAmountField = this.bertIsX ? 'positionYAmount' : 'positionXAmount';
+    const bertAmountField = this.bertIsX ? 'positionXAmount' : 'positionYAmount';
+
+    const toRemove = new Set<number>();
+
+    if (args.needSolLamports > 0n) {
+      let collected = 0n;
+      for (const b of solBins) {
+        if (collected >= args.needSolLamports) break;
+        toRemove.add(b.binId);
+        collected += BigInt(b[solAmountField].toString());
+      }
+    }
+
+    if (args.needBertRaw > 0n) {
+      let collected = 0n;
+      for (const b of bertBins) {
+        if (collected >= args.needBertRaw) break;
+        toRemove.add(b.binId);
+        collected += BigInt(b[bertAmountField].toString());
+      }
+    }
+
+    if (toRemove.size === 0) {
+      throw new Error(
+        'buildPartialCloseTx: no bins selected (need amounts may be 0 or position has no eligible bins)',
+      );
+    }
+
+    const fromBinId = Math.min(...toRemove);
+    const toBinId = Math.max(...toRemove);
+
+    logger.info(
+      {
+        positionId: args.positionId,
+        activeBin,
+        needSolLamports: args.needSolLamports.toString(),
+        needBertRaw: args.needBertRaw.toString(),
+        fromBinId,
+        toBinId,
+        binsSelected: toRemove.size,
+      },
+      'buildPartialCloseTx: removing targeted bins',
+    );
+
+    // removeLiquidity returns Transaction[]; merge to a single Transaction to
+    // match the rest of the venue-client convention.
+    const txs = await this.dlmmPool.removeLiquidity({
+      user: this.payer.publicKey,
+      position: pos.publicKey,
+      fromBinId,
+      toBinId,
+      bps: FULL_BPS, // 100% of each selected bin
+      shouldClaimAndClose: false,
+    });
+
+    const merged = new Transaction();
+    for (const t of txs) {
+      if (t instanceof Transaction && t.instructions.length > 0) {
+        merged.add(...t.instructions);
+      }
+    }
+    return merged;
+  }
+
   async simulateClose(
     nftMint: string,
     solUsd: number,

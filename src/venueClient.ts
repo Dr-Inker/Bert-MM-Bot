@@ -46,6 +46,19 @@ export interface VenueClient {
   buildClosePositionTx(
     positionId: string,
   ): Promise<{ tx: Transaction; expectedBertOut: bigint; expectedSolOut: bigint }>;
+  /**
+   * Remove liquidity from an existing position to free up target amounts of
+   * SOL and/or BERT. Implementation chooses which bins to remove from:
+   * - To free SOL: remove bins below active (they hold quote = SOL when BERT is base).
+   * - To free BERT: remove bins above active.
+   * Returns the tx signature. After confirmation, free balances will have
+   * increased by approximately the requested amounts.
+   */
+  buildPartialCloseTx(args: {
+    positionId: string;
+    needSolLamports: bigint;
+    needBertRaw: bigint;
+  }): Promise<Transaction>;
   buildSwapToRatioTx(params: {
     haveBertRaw: bigint;
     haveSolLamports: bigint;

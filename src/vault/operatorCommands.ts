@@ -334,4 +334,39 @@ export class OperatorCommandHandlers {
       `Recredited deposit ${inboundTxSig}: ${sharesMinted.toFixed(4)} shares minted to user ${telegramId} at NAV/share $${navPerShare.toFixed(6)}.`,
     );
   }
+
+  /**
+   * /resettotp <telegramId>
+   *
+   * N17: break-glass recovery when a depositor loses their authenticator.
+   * Wipes the user's TOTP secret so the next /account call runs enrollment
+   * again. Operator confirms via out-of-band verification (e.g., a signed
+   * message from the user's whitelist address) before running this.
+   */
+  async handleResetTotp(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    const m = msg.text.match(/^\/resettotp\s+(-?\d+)/);
+    if (!m) {
+      await this.deps.reply(msg.chatId, 'Usage: /resettotp <telegram_user_id>');
+      return;
+    }
+    const targetId = Number(m[1]);
+    const user = this.deps.store.getUser(targetId);
+    if (!user) {
+      await this.deps.reply(msg.chatId, `No user with telegram_id ${targetId}.`);
+      return;
+    }
+    this.deps.store.clearUserTotp(targetId);
+    this.deps.audit.write({
+      ts: this.deps.nowMs(),
+      telegramId: msg.userId,   // operator, not target
+      event: 'totp_reset',
+      details: { targetUserId: targetId },
+    });
+    await this.deps.reply(
+      msg.chatId,
+      `TOTP reset for user ${targetId}. They must run /account to re-enroll.`,
+    );
+  }
 }

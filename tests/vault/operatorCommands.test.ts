@@ -404,3 +404,81 @@ describe('OperatorCommandHandlers — /recreditdeposit (N2)', () => {
     expect(h.store.getShares(42)).toBe(0);
   });
 });
+
+describe('OperatorCommandHandlers — /resettotp (N17)', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('clears a user TOTP secret + counter and writes totp_reset audit', async () => {
+    // Seed an enrolled user.
+    h.store.createUser({
+      telegramId: 42,
+      role: 'depositor',
+      depositAddress: 'AddrEnrolled',
+      depositSecretEnc: Buffer.alloc(0),
+      depositSecretIv: Buffer.alloc(0),
+      disclaimerAt: 100,
+      createdAt: 100,
+    });
+    h.store.setTotp({
+      telegramId: 42,
+      secretEnc: Buffer.from('enc'),
+      secretIv: Buffer.from('iv'),
+      enrolledAt: h.nowRef.current - 10_000,
+    });
+    h.store.setTotpLastCounter(42, 12345);
+
+    // Pre-condition sanity: user has a TOTP enrolledAt
+    const before = h.store.getUser(42)!;
+    expect(before.totpEnrolledAt).not.toBeNull();
+
+    await h.handlers.handleResetTotp({
+      chatId: 99, userId: 99, text: '/resettotp 42',
+    });
+
+    const after = h.store.getUser(42)!;
+    expect(after.totpEnrolledAt).toBeNull();
+    expect(after.totpLastUsedCounter).toBeNull();
+
+    // Secrets also wiped (fetch via getUserSecrets to verify).
+    const secrets = h.store.getUserSecrets(42);
+    expect(secrets?.totpSecretEnc).toBeNull();
+    expect(secrets?.totpSecretIv).toBeNull();
+
+    // Audit event
+    const audit = h.store.listRecentAuditEvents(10);
+    const evt = audit.find((e) => e.event === 'totp_reset');
+    expect(evt).toBeTruthy();
+    // The operator (not the target) is recorded as the actor
+    expect(evt!.telegramId).toBe(99);
+    expect(JSON.parse(evt!.detailsJson)).toMatchObject({ targetUserId: 42 });
+
+    // Reply confirms + names the target
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/42/);
+    expect(text).toMatch(/account|re-enroll/i);
+  });
+
+  it('404s unknown user', async () => {
+    await h.handlers.handleResetTotp({
+      chatId: 99, userId: 99, text: '/resettotp 999',
+    });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/no user/i);
+    // No audit row written
+    const audit = h.store.listRecentAuditEvents(10);
+    expect(audit.find((e) => e.event === 'totp_reset')).toBeUndefined();
+  });
+
+  it('replies usage when id missing', async () => {
+    await h.handlers.handleResetTotp({
+      chatId: 99, userId: 99, text: '/resettotp',
+    });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/usage/i);
+  });
+});

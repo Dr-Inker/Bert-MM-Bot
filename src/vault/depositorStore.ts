@@ -77,6 +77,26 @@ export class DepositorStore {
       .run(counter, telegramId);
   }
 
+  /**
+   * N17: Wipe a user's TOTP enrollment. Next /account call will re-run the
+   * beginTotpEnrollment flow and show a new Base32 secret. Also clears the
+   * replay-protection counter so a re-enrolled user isn't blocked by a
+   * stale counter value.
+   *
+   * Operator-only — gated by /resettotp handler authorisation.
+   */
+  clearUserTotp(telegramId: number): void {
+    const row = this.db.prepare(
+      `UPDATE vault_users
+       SET totp_secret_enc=NULL, totp_secret_iv=NULL,
+           totp_enrolled_at=NULL, totp_last_used_counter=NULL
+       WHERE telegram_id=?`,
+    ).run(telegramId) as { changes: number };
+    if (row.changes !== 1) {
+      throw new Error(`clearUserTotp: no user with telegram_id=${telegramId}`);
+    }
+  }
+
   setWhitelistImmediate(args: { telegramId: number; address: string; ts: number }): void {
     this.db.prepare(`
       UPDATE vault_users SET whitelist_address=?, whitelist_set_at=? WHERE telegram_id=?

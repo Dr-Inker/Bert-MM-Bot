@@ -17,6 +17,7 @@ export type AuditEvent =
   | 'withdrawal_db_sync_failed'
   | 'totp_verify_failed'
   | 'totp_rate_limited'
+  | 'totp_reset'
   | 'vault_paused'
   | 'vault_resumed'
   | 'withdrawal_requeued'

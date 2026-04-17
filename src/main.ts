@@ -489,6 +489,7 @@ async function main(): Promise<void> {
           tgCmd.registerOperatorCommand('vaultstatus', (msg) => operatorHandlers.handleStatus(msg));
           tgCmd.registerOperatorCommand('forceprocess', (msg) => operatorHandlers.handleForceProcess(msg));
           tgCmd.registerOperatorCommand('recreditdeposit', (msg) => operatorHandlers.handleRecreditDeposit(msg));
+          tgCmd.registerOperatorCommand('resettotp', (msg) => operatorHandlers.handleResetTotp(msg));
           logger.info('vault commands wired into telegram commander');
         } catch (e) {
           logger.error({ err: e }, 'vault wiring failed — vault commands disabled');

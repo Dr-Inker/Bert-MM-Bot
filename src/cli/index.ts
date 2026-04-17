@@ -1,6 +1,14 @@
 import { Command } from 'commander';
+import { readFileSync } from 'node:fs';
+import { PublicKey, Transaction, sendAndConfirmTransaction, Keypair, Connection } from '@solana/web3.js';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from '@solana/spl-token';
 import { loadConfigFromFile } from '../config.js';
 import { StateStore } from '../stateStore.js';
+import { DepositorStore } from '../vault/depositorStore.js';
+import { loadMasterKey } from '../vault/encryption.js';
 import { runStatus } from './status.js';
 import { runPause } from './pause.js';
 import { runCollectFees } from './collect-fees.js';
@@ -10,6 +18,7 @@ import { runReport } from './report.js';
 import { runClearDegraded } from './clear-degraded.js';
 import { runReconcile } from './reconcile.js';
 import { runCloseOrphan } from './close-orphan.js';
+import { runBootstrap } from './vault-bootstrap.js';
 
 const CONFIG_PATH = process.env['BERT_MM_CONFIG'] ?? '/etc/bert-mm-bot/config.yaml';
 
@@ -137,6 +146,92 @@ program
     const { cfg, state } = loadDeps();
     try {
       await runCloseOrphan(cfg, state, opts.nft);
+    } finally {
+      state.close();
+    }
+  });
+
+program
+  .command('vault-bootstrap')
+  .description(
+    'One-time: initialise the vault with a founding operator deposit + opening NAV. ' +
+      'Fails if the vault already has users. Requires VAULT_MASTER_KEY env var.',
+  )
+  .requiredOption(
+    '--initial-nav-usd <amount>',
+    'Opening NAV in USD (operator receives this many shares @ $1 each)',
+    (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) throw new Error('--initial-nav-usd must be a positive number');
+      return n;
+    },
+  )
+  .option(
+    '--operator-telegram-id <id>',
+    'Override operator Telegram ID (defaults to vault.operatorTelegramId from config)',
+    (v) => {
+      const n = Number(v);
+      if (!Number.isInteger(n)) throw new Error('--operator-telegram-id must be an integer');
+      return n;
+    },
+  )
+  .action(async (opts: { initialNavUsd: number; operatorTelegramId?: number }) => {
+    const { cfg, state } = loadDeps();
+    try {
+      if (!cfg.vault) {
+        throw new Error('vault-bootstrap: config has no `vault` section; add it before bootstrapping');
+      }
+      const operatorTelegramId = opts.operatorTelegramId ?? cfg.vault.operatorTelegramId;
+      const masterKey = loadMasterKey();
+      const store = new DepositorStore(state);
+
+      // Build an ensureAta fn that creates the BERT ATA for the operator deposit
+      // address using the bot's payer keypair (mirrors main.ts). Non-fatal on
+      // failure — the sweeper can create it later if needed.
+      const keyJson = JSON.parse(readFileSync(cfg.keyfilePath, 'utf8')) as number[];
+      const payer = Keypair.fromSecretKey(Uint8Array.from(keyJson));
+      const connection = new Connection(cfg.rpcPrimary, 'confirmed');
+      const bertMintPk = new PublicKey(cfg.bertMint);
+      const ensureAta = async (addr: string): Promise<void> => {
+        try {
+          const owner = new PublicKey(addr);
+          const ata = getAssociatedTokenAddressSync(bertMintPk, owner, false);
+          const existing = await connection.getAccountInfo(ata);
+          if (existing !== null) {
+            process.stdout.write(`BERT ATA already exists: ${ata.toBase58()}\n`);
+            return;
+          }
+          const tx = new Transaction().add(
+            createAssociatedTokenAccountIdempotentInstruction(payer.publicKey, ata, owner, bertMintPk),
+          );
+          const sig = await sendAndConfirmTransaction(connection, tx, [payer], { commitment: 'confirmed' });
+          process.stdout.write(`BERT ATA created: ${ata.toBase58()} (sig=${sig})\n`);
+        } catch (e) {
+          process.stderr.write(
+            `warning: BERT ATA creation failed (non-fatal — sweeper can create it later): ${String(e)}\n`,
+          );
+        }
+      };
+
+      const result = await runBootstrap({
+        store,
+        masterKey,
+        operatorTelegramId,
+        initialNavUsd: opts.initialNavUsd,
+        ensureAta,
+        now: Date.now(),
+      });
+
+      process.stdout.write(
+        [
+          'vault-bootstrap: success',
+          `  operator telegramId: ${result.operatorTelegramId}`,
+          `  operator deposit address: ${result.depositAddress}`,
+          `  initial shares minted: ${result.initialShares}`,
+          `  opening NAV/share: $${result.navPerShare.toFixed(4)}`,
+          '',
+        ].join('\n'),
+      );
     } finally {
       state.close();
     }

@@ -21,7 +21,8 @@ export type AuditEvent =
   | 'deposit_detected'
   | 'deposit_swept'
   | 'deposit_sweep_failed'
-  | 'whitelist_activated';
+  | 'whitelist_activated'
+  | 'bootstrap';
 
 /**
  * Thin typed wrapper around DepositorStore.writeAudit so call sites get a

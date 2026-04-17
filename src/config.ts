@@ -43,7 +43,20 @@ const MevProtectionSchema = z
   })
   .optional();
 
-const BotConfigSchema = z
+const VaultConfigSchema = z.object({
+  enabled: z.boolean(),
+  withdrawalFeeBps: z.number().int().min(0).max(1000),
+  minDepositUsd: z.number().positive(),
+  minWithdrawalUsd: z.number().positive(),
+  maxDailyWithdrawalsPerUser: z.number().int().positive(),
+  maxDailyWithdrawalUsdPerUser: z.number().positive(),
+  maxPendingWithdrawals: z.number().int().positive(),
+  depositMinConfirms: z.number().int().nonnegative(),
+  whitelistCooldownHours: z.number().int().positive(),
+  operatorTelegramId: z.number().int(),
+});
+
+export const BotConfigSchema = z
   .object({
     venue: z.enum(['raydium', 'meteora']).default('raydium'),
     enabled: z.boolean(),
@@ -76,6 +89,7 @@ const BotConfigSchema = z
     heartbeatPath: z.string().min(1),
     notifier: NotifierSchema,
     dryRun: z.boolean(),
+    vault: VaultConfigSchema.optional(),
   })
   .refine((c) => c.hardPauseSolBalance < c.minSolBalance, {
     message: 'hardPauseSolBalance must be < minSolBalance',

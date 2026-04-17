@@ -87,4 +87,18 @@ export interface BotConfig {
     discord?: { webhookInfo: string; webhookCritical: string };
   };
   dryRun: boolean;
+  vault?: VaultConfig;
+}
+
+export interface VaultConfig {
+  enabled: boolean;
+  withdrawalFeeBps: number;          // 30 = 0.30%
+  minDepositUsd: number;
+  minWithdrawalUsd: number;
+  maxDailyWithdrawalsPerUser: number;
+  maxDailyWithdrawalUsdPerUser: number;
+  maxPendingWithdrawals: number;     // global queue depth cap
+  depositMinConfirms: number;        // 1 = first confirmation
+  whitelistCooldownHours: number;    // 24 in spec
+  operatorTelegramId: number;        // chat_id of the operator
 }

@@ -46,3 +46,16 @@ mevProtection:
   blockEngineUrl: "https://mainnet.block-engine.jito.wtf"
   tipLamports: 100000
   bundleTimeoutMs: 30000
+
+# Depositor vault (optional). Omit to leave disabled.
+# vault:
+#   enabled: false
+#   withdrawalFeeBps: 30              # 0.30%
+#   minDepositUsd: 10
+#   minWithdrawalUsd: 5
+#   maxDailyWithdrawalsPerUser: 3
+#   maxDailyWithdrawalUsdPerUser: 5000
+#   maxPendingWithdrawals: 50
+#   depositMinConfirms: 1
+#   whitelistCooldownHours: 24
+#   operatorTelegramId: 123456789     # your telegram user_id

@@ -37,7 +37,13 @@ export class WithdrawalExecutor {
     const queued = this.deps.store.listWithdrawalsByStatus('queued');
     for (const w of queued) {
       this.deps.store.setWithdrawalProcessing(w.id);
-      await this.processOne(w.id);
+      try {
+        await this.processOne(w.id);
+      } catch (e) {
+        const reason = e instanceof Error ? `unexpected: ${e.message}` : 'unexpected_error';
+        this.deps.store.failWithdrawal({ id: w.id, reason, processedAt: this.deps.now() });
+        // Do not re-throw — continue processing remaining withdrawals.
+      }
     }
   }
 
@@ -109,6 +115,13 @@ export class WithdrawalExecutor {
         solLamports: needSol,
         bertRaw: needBert,
       });
+      // Snapshot totalShares BEFORE the burn so we can compute the
+      // post-withdrawal pool value as (totalSharesBefore - netShares) * navPerShare.
+      // Only netShares' worth of USD leaves the pool; feeShares stay in-pool
+      // and accrete to remaining holders. Using totalShares()*navPerShare
+      // after the burn would under-count pool value by feeShares*navPerShare.
+      const totalSharesBefore = this.deps.store.totalShares();
+      const postBurnTotalValueUsd = (totalSharesBefore - netShares) * navPerShare;
       this.deps.store.withTransaction(() => {
         this.deps.store.completeWithdrawal({
           id,
@@ -118,11 +131,10 @@ export class WithdrawalExecutor {
           navPerShareAt: navPerShare,
           processedAt: now,
         });
-        const remainingShares = this.deps.store.totalShares();
         this.deps.store.insertNavSnapshot({
           ts: now,
-          totalValueUsd: remainingShares * navPerShare,
-          totalShares: remainingShares,
+          totalValueUsd: postBurnTotalValueUsd,
+          totalShares: this.deps.store.totalShares(),
           navPerShare,
           source: 'withdrawal',
         });

@@ -114,6 +114,68 @@ describe('WithdrawalExecutor', () => {
     expect(failed[0].failureReason).toBe('reserves_insufficient');
   });
 
+  it('NAV snapshot totalValueUsd reflects fee-share retention', async () => {
+    // Setup: add a second depositor so fee accretion has a visible effect
+    store.createUser({ telegramId: 2, role: 'depositor', depositAddress: 'B',
+      depositSecretEnc: Buffer.alloc(0), depositSecretIv: Buffer.alloc(0),
+      disclaimerAt: 100, createdAt: 100 });
+    store.addShares(2, 1000);  // two users, 1000 shares each, 2000 total
+
+    store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 100, feeShares: 0.3, queuedAt: 150,
+    });
+    const exec = makeExecutor({
+      freeSol: 10_000_000_000n,
+      positionUsd: 0,
+    });
+    // navPerShare pre-withdrawal: totalUsd = 10 SOL * $100 = $1000, totalShares=2000 → $0.50/share
+    // After: totalShares=1900, totalValueUsd should be (2000 - 99.7) * 0.50 = $950.15
+    await exec.drain();
+    const snap = store.latestNavSnapshot();
+    expect(snap).not.toBeNull();
+    expect(snap!.source).toBe('withdrawal');
+    expect(snap!.totalShares).toBeCloseTo(1900);  // 2000 - 100
+    expect(snap!.totalValueUsd).toBeCloseTo(950.15);  // (2000 - 99.7) * 0.50
+  });
+
+  it('drain continues past a row whose processOne throws unexpectedly', async () => {
+    // Enqueue two withdrawals; first triggers a throw in partialClose
+    const id1 = store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 500, feeShares: 1.5, queuedAt: 150,
+    });
+    const id2 = store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 100, feeShares: 0.3, queuedAt: 151,
+    });
+    let firstCall = true;
+    const exec = new WithdrawalExecutor({
+      store,
+      getMid: async () => ({ solUsd: 100, bertUsd: 0.01 }),
+      getWalletBalances: async () => ({ solLamports: 500_000_000n, bertRaw: 0n }),
+      getPositionSnapshot: async () => ({ totalValueUsd: 1000, solUsdInPosition: 0, bertUsdInPosition: 0 }),
+      reserveSolLamports: 200_000_000n,
+      partialClose: async () => {
+        if (firstCall) { firstCall = false; throw new Error('boom'); }
+      },
+      executeTransfer: async () => ({ txSig: 'ok' }),
+      now: () => 200,
+    });
+    await exec.drain();
+    // First withdrawal failed with an "unexpected:" reason
+    const failed = store.listWithdrawalsByStatus('failed');
+    expect(failed.length).toBeGreaterThanOrEqual(1);
+    const firstFailed = failed.find(f => f.id === id1);
+    expect(firstFailed).toBeDefined();
+    expect(firstFailed!.failureReason).toMatch(/unexpected/);
+    // Second withdrawal was still processed (completed or failed, either is fine — just not orphaned in 'processing')
+    const processing = store.listWithdrawalsByStatus('processing');
+    expect(processing.length).toBe(0);
+    // Reference id2 to silence unused-var warning (test only requires it not be orphaned)
+    expect(id2).toBeGreaterThan(id1);
+  });
+
   it('marks failed with oracle_unavailable on null mid', async () => {
     store.enqueueWithdrawal({
       telegramId: 1, destination: 'DEST',

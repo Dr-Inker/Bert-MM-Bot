@@ -6,6 +6,7 @@ import { AuditLog } from './audit.js';
 import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
 import { computeNavPerShare, usdForShares } from './shareMath.js';
+import { PublicKey } from '@solana/web3.js';
 
 export interface ReplyFn {
   (chatId: number, text: string, extras?: { photoBase64?: string }): Promise<void>;
@@ -123,6 +124,13 @@ export class CommandHandlers {
       case 'balance_reveal':
         await this.respondBalanceReveal(msg);
         return;
+      case 'setwhitelist_first':
+      case 'setwhitelist_change':
+        await this.respondSetWhitelist(msg, pending);
+        return;
+      case 'cancelwhitelist':
+        await this.respondCancelWhitelist(msg);
+        return;
       default:
         // Other branches wired in later sub-steps. Drop the pending entry to
         // avoid leaking state if we hit an unhandled branch in dev.
@@ -188,6 +196,112 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
+    );
+  }
+
+  // ── /setwhitelist ─────────────────────────────────────────────────────
+  async handleSetWhitelist(msg: { chatId: number; userId: number; text: string }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      return;
+    }
+    const parts = msg.text.trim().split(/\s+/);
+    const addr = parts[1];
+    if (!addr) {
+      await this.deps.reply(msg.chatId, 'Usage: /setwhitelist <solana-address>');
+      return;
+    }
+    try {
+      // eslint-disable-next-line no-new
+      new PublicKey(addr);
+    } catch {
+      await this.deps.reply(msg.chatId, 'That does not look like a valid Solana address.');
+      return;
+    }
+    if (user.whitelistAddress === null) {
+      this.pending.set(msg.userId, { kind: 'setwhitelist_first', address: addr });
+      await this.deps.reply(
+        msg.chatId,
+        `First whitelist setup. Reply with your 2FA code to set ${addr} immediately.`,
+      );
+    } else {
+      this.pending.set(msg.userId, { kind: 'setwhitelist_change', address: addr });
+      await this.deps.reply(
+        msg.chatId,
+        `Whitelist change requested: ${addr}.\n` +
+          `Reply with your 2FA code to enqueue. Changes activate after a 24-hour cooldown; ` +
+          `use /cancelwhitelist before it activates to abort.`,
+      );
+    }
+  }
+
+  // ── /cancelwhitelist ──────────────────────────────────────────────────
+  async handleCancelWhitelist(msg: { chatId: number; userId: number }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      return;
+    }
+    this.pending.set(msg.userId, { kind: 'cancelwhitelist' });
+    await this.deps.reply(msg.chatId, 'Reply with your 2FA code to cancel the pending whitelist change.');
+  }
+
+  private async respondSetWhitelist(
+    msg: { chatId: number; userId: number; text: string },
+    pending: Extract<PendingAction, { kind: 'setwhitelist_first' | 'setwhitelist_change' }>,
+  ): Promise<void> {
+    this.pending.delete(msg.userId);
+    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    if (!v.ok) {
+      this.audit.write({
+        ts: this.deps.nowMs(), telegramId: msg.userId,
+        event: 'totp_verify_failed', details: { op: pending.kind },
+      });
+      await this.deps.reply(msg.chatId, '2FA code invalid. Try /setwhitelist again.');
+      return;
+    }
+    const result = this.deps.cooldowns.requestChange({
+      telegramId: msg.userId, newAddress: pending.address, now: this.deps.nowMs(),
+    });
+    this.audit.write({
+      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'whitelist_set',
+      details: { address: pending.address, immediate: result.immediate, activatesAt: result.activatesAt },
+    });
+    if (result.immediate) {
+      await this.deps.reply(msg.chatId, `Whitelist set to ${pending.address} (effective immediately).`);
+    } else {
+      const activates = new Date(result.activatesAt).toISOString();
+      await this.deps.reply(
+        msg.chatId,
+        `Whitelist change queued. Activates at ${activates}. Use /cancelwhitelist to abort before then.`,
+      );
+    }
+  }
+
+  private async respondCancelWhitelist(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    this.pending.delete(msg.userId);
+    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    if (!v.ok) {
+      this.audit.write({
+        ts: this.deps.nowMs(), telegramId: msg.userId,
+        event: 'totp_verify_failed', details: { op: 'cancelwhitelist' },
+      });
+      await this.deps.reply(msg.chatId, '2FA code invalid. Try /cancelwhitelist again.');
+      return;
+    }
+    const ok = this.deps.cooldowns.cancelPending({
+      telegramId: msg.userId, reason: 'user', now: this.deps.nowMs(),
+    });
+    this.audit.write({
+      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'whitelist_cancel',
+      details: { cancelled: ok },
+    });
+    await this.deps.reply(
+      msg.chatId,
+      ok ? 'Pending whitelist change cancelled.' : 'Nothing to cancel — no pending whitelist change.',
     );
   }
 

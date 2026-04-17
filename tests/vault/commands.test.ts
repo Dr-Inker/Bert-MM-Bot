@@ -214,3 +214,84 @@ describe('CommandHandlers — /balance', () => {
     expect(text).toMatch(/invalid|failed/i);
   });
 });
+
+describe('CommandHandlers — /setwhitelist + /cancelwhitelist', () => {
+  let h: Harness;
+  const ADDR1 = '7BZ16d4tgebvQ7j59tY1QkwCQ4xd6tqN9GzdAH9v1arF';
+  const ADDR2 = 'G2Hw7syz4YjwYdBBW13MzaZUJazoryoKoSfXbPSjvVyn';
+
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('first-set: after TOTP, whitelist is applied immediately', async () => {
+    const secret = await enrollFully(h, 7);
+    await h.handlers.handleSetWhitelist({ chatId: 5, userId: 7, text: `/setwhitelist ${ADDR1}` });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('setwhitelist_first');
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    expect(h.store.getUser(7)!.whitelistAddress).toBe(ADDR1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/active|effect|set/i);
+  });
+
+  it('subsequent change: after TOTP, enqueued with 24h cooldown', async () => {
+    const secret = await enrollFully(h, 7);
+    // first-set synchronously
+    h.store.setWhitelistImmediate({ telegramId: 7, address: ADDR1, ts: 100 });
+
+    await h.handlers.handleSetWhitelist({ chatId: 5, userId: 7, text: `/setwhitelist ${ADDR2}` });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('setwhitelist_change');
+    const [, promptText] = h.reply.mock.calls[0];
+    expect(promptText).toMatch(/24/);
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    // Not yet changed
+    expect(h.store.getUser(7)!.whitelistAddress).toBe(ADDR1);
+    expect(h.store.mostRecentPendingChange(7)?.newAddress).toBe(ADDR2);
+  });
+
+  it('cancelwhitelist: success when pending exists', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: ADDR1, ts: 100 });
+    h.cooldowns.requestChange({ telegramId: 7, newAddress: ADDR2, now: h.nowRef.current });
+
+    await h.handlers.handleCancelWhitelist({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('cancelwhitelist');
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/cancel/i);
+    expect(h.store.mostRecentPendingChange(7)).toBeNull();
+  });
+
+  it('cancelwhitelist: replies "nothing to cancel" when nothing pending', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: ADDR1, ts: 100 });
+
+    await h.handlers.handleCancelWhitelist({ chatId: 5, userId: 7 });
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/nothing|no pending/i);
+  });
+});

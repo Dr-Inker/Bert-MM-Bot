@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Transaction, PublicKey, Keypair } from '@solana/web3.js';
 import BN from 'bn.js';
 import Decimal from 'decimal.js';
+import { createRequire } from 'node:module';
+import Module from 'node:module';
 import type { PositionSnapshot } from '../src/types.js';
 
 // ─── Mock constants ─────────────────────────────────────────────────────────
@@ -90,12 +92,30 @@ const mockGetPriceOfBinByBinId = vi.fn().mockImplementation(
   (binId: number, binStep: number) => new Decimal(Math.pow(1 + binStep / 10_000, binId)),
 );
 
-vi.mock('@meteora-ag/dlmm', () => ({
+// Preseed Node's CJS require cache so that `createRequire(import.meta.url)`
+// inside `src/meteoraClient.ts` returns our mock instead of the real package.
+// This is required because vi.mock only intercepts ESM imports and the source
+// deliberately uses createRequire to work around @meteora-ag/dlmm's broken ESM
+// entry. Without this, `DLMM.create` runs against the real SDK and blows up on
+// `connection.getMultipleAccountsInfo is not a function` during `init()`.
+const __meteoraMockExports = {
   default: mockDLMM,
   DLMM: mockDLMM,
   StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 },
   getPriceOfBinByBinId: mockGetPriceOfBinByBinId,
-}));
+};
+{
+  const req = createRequire(import.meta.url);
+  const resolved = req.resolve('@meteora-ag/dlmm');
+  const m = new Module(resolved);
+  m.filename = resolved;
+  m.loaded = true;
+  m.exports = __meteoraMockExports;
+  req.cache[resolved] = m;
+}
+
+// Also keep the ESM vi.mock in case any future refactor uses `await import(...)`.
+vi.mock('@meteora-ag/dlmm', () => __meteoraMockExports);
 
 // ─── Mock: @solana/web3.js (partial — keep real Transaction/PublicKey) ──────
 

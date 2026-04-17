@@ -2,6 +2,7 @@ import type { DepositorStore } from './depositorStore.js';
 import type { StateStore } from '../stateStore.js';
 import type { AuditLog } from './audit.js';
 import type { ReplyFn } from './commands.js';
+import { VAULT_PAUSED_FLAG } from './flags.js';
 
 export interface OperatorCommandsDeps {
   store: DepositorStore;
@@ -25,7 +26,7 @@ export class OperatorCommandHandlers {
   constructor(private deps: OperatorCommandsDeps) {}
 
   async handlePause(msg: { chatId: number; userId: number }): Promise<void> {
-    this.deps.state.setFlag('vault_paused', '1', 'operator /pausevault');
+    this.deps.state.setFlag(VAULT_PAUSED_FLAG, '1', 'operator /pausevault');
     this.deps.audit.write({
       ts: this.deps.nowMs(), telegramId: msg.userId, event: 'vault_paused',
     });
@@ -38,7 +39,7 @@ export class OperatorCommandHandlers {
   async handleResume(msg: { chatId: number; userId: number }): Promise<void> {
     // setFlag with empty string — keeps schema simple (no DELETE FROM flags).
     // Downstream readers should treat empty or missing as "not paused".
-    this.deps.state.setFlag('vault_paused', '', 'operator /resumevault');
+    this.deps.state.setFlag(VAULT_PAUSED_FLAG, '', 'operator /resumevault');
     this.deps.audit.write({
       ts: this.deps.nowMs(), telegramId: msg.userId, event: 'vault_resumed',
     });
@@ -53,7 +54,7 @@ export class OperatorCommandHandlers {
     const totalShares = this.deps.store.totalShares();
     const queuedCount = this.deps.store.countPendingWithdrawals();
     const pendingWhitelist = this.deps.store.countPendingWhitelistChanges();
-    const paused = (this.deps.state.getFlag('vault_paused') ?? '') === '1';
+    const paused = (this.deps.state.getFlag(VAULT_PAUSED_FLAG) ?? '') === '1';
     const recent = this.deps.store.listRecentAuditEvents(5);
 
     const tvlStr = snap

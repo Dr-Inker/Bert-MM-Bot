@@ -17,7 +17,11 @@ export type AuditEvent =
   | 'totp_verify_failed'
   | 'vault_paused'
   | 'vault_resumed'
-  | 'withdrawal_requeued';
+  | 'withdrawal_requeued'
+  | 'deposit_detected'
+  | 'deposit_swept'
+  | 'deposit_sweep_failed'
+  | 'whitelist_activated';
 
 /**
  * Thin typed wrapper around DepositorStore.writeAudit so call sites get a

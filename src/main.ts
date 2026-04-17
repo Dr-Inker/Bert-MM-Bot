@@ -1,5 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, PublicKey, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from '@solana/spl-token';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadConfigFromFile } from './config.js';
 import { logger } from './logger.js';
@@ -13,6 +17,13 @@ import { CommandHandlers } from './vault/commands.js';
 import { OperatorCommandHandlers } from './vault/operatorCommands.js';
 import { AuditLog } from './vault/audit.js';
 import { loadMasterKey } from './vault/encryption.js';
+import { DepositWatcher } from './vault/depositWatcher.js';
+import { CreditEngine } from './vault/creditEngine.js';
+import { DepositPipeline } from './vault/depositPipeline.js';
+import { WithdrawalExecutor } from './vault/withdrawalExecutor.js';
+import { buildWithdrawalInstructions } from './vault/withdrawalBuilder.js';
+import { computeNavPerShare } from './vault/shareMath.js';
+import { runVaultPreRebalance, runVaultPostRebalance } from './vault/tick.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -95,6 +106,19 @@ async function main(): Promise<void> {
   };
 
   const priceHistory: MidPrice[] = [];
+
+  // ─── Vault runtime (constructed outside the telegram block so the tick ───
+  // loop can reach it even when telegram is not configured). Only populated
+  // when cfg.vault.enabled is true. All fields are the live objects used by
+  // the pre/post-rebalance tick helpers.
+  interface VaultRuntime {
+    depositorStore: DepositorStore;
+    cooldowns: Cooldowns;
+    watcher: DepositWatcher;
+    executor: WithdrawalExecutor;
+  }
+  let vaultRuntime: VaultRuntime | null = null;
+
   // Start Telegram command listener (if configured)
   if (cfg.notifier?.telegram) {
     const depositorStore = new DepositorStore(state);
@@ -173,12 +197,39 @@ async function main(): Promise<void> {
       if (cfg.vault?.enabled) {
         try {
           const masterKey = loadMasterKey();
-          // NOTE: real ATA creation is deferred to a follow-up task; for now
-          // the enrollment path logs and no-ops. Inbound deposits will still
-          // arrive at the deposit address; the sweeper can create the vault
-          // ATA on first sweep if needed.
+          // Real ATA creation (Task 20): when a user enrolls, create the BERT
+          // ATA for their fresh deposit address so inbound SPL transfers can
+          // land. Uses the payer keypair to cover the account-create rent; the
+          // ATA is idempotent so this is safe to call unconditionally.
+          const bertMintPk = new PublicKey(cfg.bertMint);
           const ensureAta = async (addr: string): Promise<void> => {
-            logger.info({ depositAddress: addr }, 'vault: ATA creation stub (wire in Task 20)');
+            try {
+              const owner = new PublicKey(addr);
+              const ata = getAssociatedTokenAddressSync(bertMintPk, owner, false);
+              // Short-circuit if the ATA already exists (cheap RPC call vs.
+              // paying fees for a redundant tx).
+              const existing = await raydium.getConnection().getAccountInfo(ata);
+              if (existing !== null) {
+                logger.info({ depositAddress: addr, ata: ata.toBase58() }, 'vault: BERT ATA already exists');
+                return;
+              }
+              const tx = new Transaction().add(
+                createAssociatedTokenAccountIdempotentInstruction(
+                  payer.publicKey, ata, owner, bertMintPk,
+                ),
+              );
+              const sig = await sendAndConfirmTransaction(
+                raydium.getConnection(), tx, [payer], { commitment: 'confirmed' },
+              );
+              logger.info(
+                { depositAddress: addr, ata: ata.toBase58(), sig },
+                'vault: BERT ATA created for new deposit address',
+              );
+            } catch (e) {
+              // Non-fatal: the sweeper can create the ATA later if needed, and
+              // enrollment doesn't rely on the ATA existing to record the user.
+              logger.warn({ err: e, depositAddress: addr }, 'vault: ATA creation failed (non-fatal)');
+            }
           };
           const depositorStoreLocal = depositorStore; // re-alias for clarity
           const enrollment = new Enrollment({
@@ -190,6 +241,114 @@ async function main(): Promise<void> {
             store: depositorStoreLocal,
             cooldownMs: cfg.vault.whitelistCooldownHours * 3600_000,
           });
+
+          // ─── Deposit pipeline ────────────────────────────────────────────
+          // Wires deposit-watcher → sweeper → creditEngine. The watcher
+          // polls each enrolled user's deposit address; any new inbound
+          // tx triggers `pipeline.onInflow`, which sweeps + credits shares.
+          const creditEngine = new CreditEngine({ store: depositorStoreLocal });
+          const depositPipeline = new DepositPipeline({
+            store: depositorStoreLocal,
+            connection: raydium.getConnection(),
+            payerKeypair: payer,
+            bertMint: bertMintPk,
+            masterKey,
+            creditEngine,
+            getMid: async () => {
+              // Use the most recent price sample in history (mirrors how the
+              // rebalancer sees prices). If priceHistory is empty at tick 0,
+              // return null — pipeline will defer credit and retry on the
+              // next watcher poll.
+              const last = priceHistory[priceHistory.length - 1];
+              return last ? { solUsd: last.solUsd, bertUsd: last.bertUsd } : null;
+            },
+            getNavPerShare: async () => {
+              const snap = depositorStoreLocal.latestNavSnapshot();
+              const totalShares = depositorStoreLocal.totalShares();
+              return computeNavPerShare({
+                totalUsd: snap?.totalValueUsd ?? 0,
+                totalShares,
+              });
+            },
+            // Leave 2M lamports in each deposit address for the BERT ATA's
+            // rent-exempt reserve (ATAs need ~2_039_280 lamports per mint).
+            rentReserveLamports: 2_039_280n,
+            now: () => Date.now(),
+            log: logger,
+            submitTx: async (tx, extraSigners) => {
+              const sig = await sendAndConfirmTransaction(
+                raydium.getConnection(), tx, [payer, ...extraSigners],
+                { commitment: 'confirmed' },
+              );
+              return sig;
+            },
+          });
+          const depositWatcher = new DepositWatcher({
+            connection: raydium.getConnection(),
+            bertMint: cfg.bertMint,
+            isAlreadyCredited: (sig) => depositorStoreLocal.hasDeposit(sig),
+            onInflow: (event) => depositPipeline.onInflow(event),
+          });
+
+          // ─── Withdrawal executor ────────────────────────────────────────
+          const withdrawalExecutor = new WithdrawalExecutor({
+            store: depositorStoreLocal,
+            getMid: async () => {
+              const last = priceHistory[priceHistory.length - 1];
+              return last ? { solUsd: last.solUsd, bertUsd: last.bertUsd } : null;
+            },
+            getWalletBalances: () => raydium.getWalletBalances(),
+            getPositionSnapshot: async () => {
+              const stored = state.getCurrentPosition();
+              if (!stored) return { totalValueUsd: 0, solUsdInPosition: 0, bertUsdInPosition: 0 };
+              const last = priceHistory[priceHistory.length - 1];
+              const solUsd = last?.solUsd ?? 0;
+              const pos = await raydium.getPosition(stored.nftMint, solUsd);
+              return {
+                totalValueUsd: pos?.totalValueUsd ?? 0,
+                solUsdInPosition: 0,
+                bertUsdInPosition: 0,
+              };
+            },
+            reserveSolLamports: BigInt(cfg.minSolFloorLamports),
+            partialClose: async ({ needSolLamports, needBertRaw }) => {
+              const stored = state.getCurrentPosition();
+              if (!stored) {
+                throw new Error('partialClose: no stored position');
+              }
+              const tx = await raydium.buildPartialCloseTx({
+                positionId: stored.nftMint,
+                needSolLamports,
+                needBertRaw,
+              });
+              await submitter.submit(tx, { priorityFeeMicroLamports: cfg.priorityFeeMicroLamports });
+            },
+            executeTransfer: async ({ destination, solLamports, bertRaw }) => {
+              const ixs = buildWithdrawalInstructions({
+                payer: payer.publicKey,
+                destinationWallet: new PublicKey(destination),
+                solLamports,
+                bertRaw,
+                bertMint: bertMintPk,
+                createDestAtaIfMissing: true,
+              });
+              const tx = new Transaction();
+              for (const ix of ixs) tx.add(ix);
+              const sig = await submitter.submit(tx, {
+                priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
+              });
+              return { txSig: sig };
+            },
+            now: () => Date.now(),
+          });
+
+          vaultRuntime = {
+            depositorStore: depositorStoreLocal,
+            cooldowns,
+            watcher: depositWatcher,
+            executor: withdrawalExecutor,
+          };
+
           const getNav = (): { totalUsd: number; totalShares: number } => {
             const snap = depositorStoreLocal.latestNavSnapshot();
             const totalShares = depositorStoreLocal.totalShares();
@@ -275,6 +434,17 @@ async function main(): Promise<void> {
         if (priceHistory.length > MAX_HISTORY_SAMPLES) priceHistory.shift();
       }
 
+      // ─── Vault: poll deposit addresses (runs BEFORE rebalance so any
+      // inflows are swept + credited against a fresh NAV). Errors are
+      // swallowed per-address inside the helper.
+      if (vaultRuntime) {
+        await runVaultPreRebalance({
+          store: vaultRuntime.depositorStore,
+          pollAddress: (addr) => vaultRuntime!.watcher.pollAddress(addr),
+          log: logger,
+        });
+      }
+
       const storedPos = state.getCurrentPosition();
       let position = storedPos
         ? await raydium.getPosition(storedPos.nftMint, mid?.solUsd ?? 0).catch((e) => {
@@ -352,6 +522,23 @@ async function main(): Promise<void> {
         await notifier.send('CRITICAL', `PAUSE: ${decision.reason}`);
       } else if (decision.kind === 'ALERT_ONLY') {
         await notifier.send('WARN', `ALERT_ONLY: ${decision.reason}`);
+      }
+
+      // ─── Vault: drain withdrawals + activate due whitelist changes.
+      // Runs AFTER rebalance so free-balance / position state reflects the
+      // latest swap. Gated on degraded / kill-switch / vault-paused — the
+      // helper enforces these internally.
+      if (vaultRuntime) {
+        await runVaultPostRebalance({
+          store: vaultRuntime.depositorStore,
+          state,
+          isDegraded: () => state.isDegraded(),
+          isKilled: () => killSwitchTripped,
+          drain: () => vaultRuntime!.executor.drain(),
+          activateDue: (args) => vaultRuntime!.cooldowns.activateDue(args),
+          now: () => Date.now(),
+          log: logger,
+        });
       }
 
       // ─── Hourly status report ───────────────────────────────────────────────

@@ -87,7 +87,9 @@ export async function executeRebalance(
     }
 
     try {
-      closeSig = await submitter.submit(closeTx.tx, {
+      // Close-position via Jito when enabled — private mempool prevents
+      // searchers from frontrunning the close with price manipulation.
+      closeSig = await submitter.submitProtected(closeTx.tx, {
         priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
         dryRun: cfg.dryRun,
       });
@@ -243,7 +245,9 @@ export async function executeRebalance(
       solUsd: mid.solUsd,
     });
 
-    openSig = await submitter.submit(openTx, {
+    // Open-position via Jito when enabled — prevents searchers from
+    // seeing our fresh position range before it's on-chain.
+    openSig = await submitter.submitProtected(openTx, {
       priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
       dryRun: cfg.dryRun,
       extraSigners: openSigners,

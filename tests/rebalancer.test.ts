@@ -123,6 +123,12 @@ function makeDeps(overrides: Partial<RebalancerDeps> = {}): RebalancerDeps {
       const calls = (submitter.submit as ReturnType<typeof vi.fn>).mock.calls.length;
       return calls === 1 ? CLOSE_SIG : OPEN_SIG;
     }),
+    // submitProtected delegates to submit so existing mocks + assertions work
+    // unchanged. In production, submitProtected routes through Jito first with
+    // a public-RPC fallback to submit.
+    submitProtected: vi.fn().mockImplementation(async (tx: Transaction, opts?: { dryRun?: boolean }) => {
+      return submitter.submit(tx, opts);
+    }),
   };
 
   const state = {

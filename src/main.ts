@@ -32,7 +32,7 @@ import { JitoClient } from './jitoClient.js';
 import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
 import { executeRebalance } from './rebalancer.js';
-import { computeNav } from './vault/navSnapshot.js';
+import { computeNav, computeVaultStats, formatVaultStatsLine } from './vault/navSnapshot.js';
 import type { BotState, MidPrice } from './types.js';
 
 const CONFIG_PATH = process.env.BERT_MM_CONFIG ?? '/etc/bert-mm-bot/config.yaml';
@@ -592,6 +592,51 @@ async function main(): Promise<void> {
           } catch { /* skip */ }
         }
 
+        // Vault stats (only when vault is enabled + wired). Uses live NAV
+        // (fresh balances + position value) rather than the latest snapshot,
+        // so TVL reflects the current state. 24h delta falls back to 0 when
+        // no snapshot exists yet (vault < 24h old).
+        let vaultLine = '';
+        if (cfg.vault?.enabled && vaultRuntime) {
+          try {
+            const store = vaultRuntime.depositorStore;
+            const users = store.listUsers();
+            const totalShares = store.totalShares();
+            const queued = store.countPendingWithdrawals();
+
+            // Prefer live NAV; fall back to latest snapshot if balance/position
+            // fetch fails.
+            let tvlUsd = 0;
+            try {
+              const bal = await raydium.getWalletBalances();
+              const liveNav = computeNav({
+                freeSolLamports: bal.solLamports,
+                freeBertRaw: bal.bertRaw,
+                positionTotalValueUsd: position?.totalValueUsd ?? 0,
+                uncollectedFeesBert: position?.uncollectedFeesBert ?? 0n,
+                uncollectedFeesSol: position?.uncollectedFeesSol ?? 0n,
+                solUsd: mid?.solUsd ?? 0,
+                bertUsd: mid?.bertUsd ?? 0,
+              });
+              tvlUsd = liveNav.totalUsd;
+            } catch {
+              tvlUsd = store.latestNavSnapshot()?.totalValueUsd ?? 0;
+            }
+
+            const snapshot24hAgo = store.navSnapshotAtOrBefore(tickStart - 24 * 3600 * 1000);
+            const stats = computeVaultStats({
+              depositorCount: users.length,
+              totalShares,
+              tvlUsd,
+              queuedWithdrawals: queued,
+              snapshot24hAgo,
+            });
+            vaultLine = formatVaultStatsLine(stats);
+          } catch (e) {
+            logger.warn({ err: e }, 'hourly report: vault stats computation failed');
+          }
+        }
+
         // Pool volume from DexScreener
         let volumeLine = '';
         try {
@@ -616,6 +661,7 @@ async function main(): Promise<void> {
           posValueLine,
           feeLine,
           totalLine,
+          vaultLine,
           volumeLine,
           `Rebalances today: ${state.getRebalancesToday(tickStart)}/${cfg.maxRebalancesPerDay}`,
           `Status: ${killSwitchTripped ? '🔴 KILLED' : state.isDegraded() ? '🟡 DEGRADED' : '🟢 OK'}`,

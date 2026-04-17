@@ -5,7 +5,7 @@ import { DISCLAIMER_TEXT } from './disclaimer.js';
 import { AuditLog } from './audit.js';
 import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
-import { computeNavPerShare, usdForShares } from './shareMath.js';
+import { computeNavPerShare, usdForShares, splitFee } from './shareMath.js';
 import { PublicKey } from '@solana/web3.js';
 
 export interface ReplyFn {
@@ -131,6 +131,9 @@ export class CommandHandlers {
       case 'cancelwhitelist':
         await this.respondCancelWhitelist(msg);
         return;
+      case 'withdraw':
+        await this.respondWithdraw(msg, pending);
+        return;
       default:
         // Other branches wired in later sub-steps. Drop the pending entry to
         // avoid leaking state if we hit an unhandled branch in dev.
@@ -196,6 +199,135 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
+    );
+  }
+
+  // ── /withdraw ─────────────────────────────────────────────────────────
+  async handleWithdraw(msg: { chatId: number; userId: number; text: string }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      return;
+    }
+    if (!user.whitelistAddress) {
+      await this.deps.reply(msg.chatId, 'Set a withdrawal destination first via /setwhitelist.');
+      return;
+    }
+    const parts = msg.text.trim().split(/\s+/);
+    const raw = parts[1];
+    if (!raw) {
+      await this.deps.reply(msg.chatId, 'Usage: /withdraw <usd-amount|percent%>  (e.g., /withdraw 100 or /withdraw 50%)');
+      return;
+    }
+
+    // Compute the user's available USD up-front so we can parse percentage.
+    const nav = this.deps.getNav();
+    const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
+    const shares = this.deps.store.getShares(msg.userId);
+    const userUsd = usdForShares({ netShares: shares, navPerShare });
+
+    let amountUsd: number;
+    if (raw.endsWith('%')) {
+      const pct = Number(raw.slice(0, -1));
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+        await this.deps.reply(msg.chatId, 'Invalid percentage. Use e.g. /withdraw 50%');
+        return;
+      }
+      amountUsd = userUsd * pct / 100;
+    } else {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        await this.deps.reply(msg.chatId, 'Invalid amount. Use e.g. /withdraw 100 or /withdraw 50%');
+        return;
+      }
+      amountUsd = n;
+    }
+
+    // Checks (fail-closed)
+    if (amountUsd < this.deps.config.minWithdrawalUsd) {
+      await this.deps.reply(
+        msg.chatId,
+        `Amount below minimum ($${this.deps.config.minWithdrawalUsd.toFixed(2)}).`,
+      );
+      return;
+    }
+    if (amountUsd > userUsd + 1e-6) {
+      await this.deps.reply(msg.chatId, `Amount exceeds your balance ($${userUsd.toFixed(2)}).`);
+      return;
+    }
+    const countToday = this.deps.store.countUserWithdrawalsLast24h(msg.userId, this.deps.nowMs());
+    if (countToday >= this.deps.config.maxDailyWithdrawalsPerUser) {
+      await this.deps.reply(
+        msg.chatId,
+        `Daily withdrawal limit reached (${this.deps.config.maxDailyWithdrawalsPerUser}/day). Try again tomorrow.`,
+      );
+      return;
+    }
+    const usdToday = this.deps.store.sumUserWithdrawalUsdLast24h(msg.userId, this.deps.nowMs());
+    if (usdToday + amountUsd > this.deps.config.maxDailyWithdrawalUsdPerUser) {
+      await this.deps.reply(
+        msg.chatId,
+        `Daily USD cap would be exceeded ` +
+          `(cap $${this.deps.config.maxDailyWithdrawalUsdPerUser.toFixed(0)}, used $${usdToday.toFixed(2)}).`,
+      );
+      return;
+    }
+    if (this.deps.store.countPendingWithdrawals() >= this.deps.config.maxPendingWithdrawals) {
+      await this.deps.reply(
+        msg.chatId,
+        `Withdrawal queue is full right now. Try again in a few minutes.`,
+      );
+      return;
+    }
+
+    this.pending.set(msg.userId, { kind: 'withdraw', amountUsd });
+    await this.deps.reply(
+      msg.chatId,
+      `Reply with your 2FA code to queue a $${amountUsd.toFixed(2)} withdrawal to ${user.whitelistAddress}.`,
+    );
+  }
+
+  private async respondWithdraw(
+    msg: { chatId: number; userId: number; text: string },
+    pending: Extract<PendingAction, { kind: 'withdraw' }>,
+  ): Promise<void> {
+    this.pending.delete(msg.userId);
+    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    if (!v.ok) {
+      this.audit.write({
+        ts: this.deps.nowMs(), telegramId: msg.userId,
+        event: 'totp_verify_failed', details: { op: 'withdraw' },
+      });
+      await this.deps.reply(msg.chatId, '2FA code invalid. Try /withdraw again.');
+      return;
+    }
+    const user = this.deps.store.getUser(msg.userId)!;
+    if (!user.whitelistAddress) {
+      await this.deps.reply(msg.chatId, 'No whitelist address set.');
+      return;
+    }
+    const nav = this.deps.getNav();
+    const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
+    if (navPerShare <= 0) {
+      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      return;
+    }
+    const sharesBurned = pending.amountUsd / navPerShare;
+    const { feeShares } = splitFee({ sharesBurned, feeBps: this.deps.config.withdrawalFeeBps });
+    const id = this.deps.store.enqueueWithdrawal({
+      telegramId: msg.userId,
+      destination: user.whitelistAddress,
+      sharesBurned,
+      feeShares,
+      queuedAt: this.deps.nowMs(),
+    });
+    this.audit.write({
+      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'withdrawal_queued',
+      details: { id, amountUsd: pending.amountUsd, sharesBurned, feeShares, destination: user.whitelistAddress },
+    });
+    await this.deps.reply(
+      msg.chatId,
+      `Queued! Your withdrawal of $${pending.amountUsd.toFixed(2)} will be processed on the next tick.`,
     );
   }
 

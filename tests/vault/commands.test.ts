@@ -295,3 +295,119 @@ describe('CommandHandlers — /setwhitelist + /cancelwhitelist', () => {
     expect(text).toMatch(/nothing|no pending/i);
   });
 });
+
+describe('CommandHandlers — /withdraw', () => {
+  let h: Harness;
+  const DEST = '7BZ16d4tgebvQ7j59tY1QkwCQ4xd6tqN9GzdAH9v1arF';
+
+  beforeEach(() => {
+    h = buildHarness();
+    // NAV = $2000 / 1000 shares = $2/share (user value @ 100 shares = $200)
+    h.navProvider.totalUsd = 2000;
+    h.navProvider.totalShares = 1000;
+  });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('not enrolled: refuses', async () => {
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 100' });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/\/account/i);
+  });
+
+  it('no whitelist: refuses', async () => {
+    await enrollFully(h, 7);
+    h.store.addShares(7, 100);
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 100' });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/whitelist/i);
+  });
+
+  it('below min: refuses', async () => {
+    await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: DEST, ts: 100 });
+    h.store.addShares(7, 100);
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 5' });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/minimum|min/i);
+  });
+
+  it('exceeds daily count cap: refuses', async () => {
+    await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: DEST, ts: 100 });
+    h.store.addShares(7, 100);
+    // Pre-seed 3 queued withdrawals (config cap = 3)
+    for (let i = 0; i < 3; i++) {
+      h.store.enqueueWithdrawal({
+        telegramId: 7, destination: DEST, sharesBurned: 1, feeShares: 0, queuedAt: h.nowRef.current,
+      });
+    }
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 50' });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/daily|limit|cap/i);
+  });
+
+  it('exceeds global queue cap: refuses', async () => {
+    await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: DEST, ts: 100 });
+    h.store.addShares(7, 100);
+    // Fill global queue to cap (maxPendingWithdrawals=20)
+    h.store.createUser({
+      telegramId: 99, role: 'depositor', depositAddress: 'OTHER',
+      depositSecretEnc: Buffer.alloc(0), depositSecretIv: Buffer.alloc(0),
+      disclaimerAt: 100, createdAt: 100,
+    });
+    for (let i = 0; i < 20; i++) {
+      h.store.enqueueWithdrawal({
+        telegramId: 99, destination: DEST, sharesBurned: 1, feeShares: 0, queuedAt: h.nowRef.current,
+      });
+    }
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 50' });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/queue|busy|full/i);
+  });
+
+  it('success: enqueues withdrawal after TOTP', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: DEST, ts: 100 });
+    h.store.addShares(7, 100);
+
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 100' });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('withdraw');
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/queued|will be processed/i);
+    const queued = h.store.listWithdrawalsByStatus('queued');
+    expect(queued.length).toBe(1);
+    expect(queued[0]!.telegramId).toBe(7);
+    // sharesBurned ≈ 100 USD / 2 USD-per-share = 50 shares
+    expect(queued[0]!.sharesBurned).toBeCloseTo(50, 2);
+    // feeShares at 30 bps = 0.3% of 50 = 0.15
+    expect(queued[0]!.feeShares).toBeCloseTo(0.15, 3);
+  });
+
+  it('percent syntax: 50% of user balance', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: DEST, ts: 100 });
+    h.store.addShares(7, 100);
+    // navPerShare=2, user has 100 shares worth $200, 50% = $100 → 50 shares
+
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 50%' });
+    h.reply.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    const queued = h.store.listWithdrawalsByStatus('queued');
+    expect(queued.length).toBe(1);
+    expect(queued[0]!.sharesBurned).toBeCloseTo(50, 2);
+  });
+});

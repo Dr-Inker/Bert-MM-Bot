@@ -201,6 +201,42 @@ export class DepositorStore {
     return row.n;
   }
 
+  /**
+   * Count withdrawals (queued + processing + completed) for `telegramId` whose
+   * queued_at falls in the last 24h from `nowMs`. Used for per-user daily cap.
+   * Failed withdrawals are excluded so a transient failure doesn't burn a slot.
+   */
+  countUserWithdrawalsLast24h(telegramId: number, nowMs: number): number {
+    const since = nowMs - 24 * 3600 * 1000;
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM vault_withdrawals
+      WHERE telegram_id=? AND status IN ('queued','processing','completed') AND queued_at >= ?
+    `).get(telegramId, since) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Sum USD-equivalent of withdrawals for `telegramId` in the last 24h across
+   * queued + processing + completed. For queued/processing rows nav_per_share_at
+   * is null so we fall back to the latest NAV snapshot (via a subquery).
+   * Used for per-user daily USD cap.
+   */
+  sumUserWithdrawalUsdLast24h(telegramId: number, nowMs: number): number {
+    const since = nowMs - 24 * 3600 * 1000;
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(
+        (shares_burned - fee_shares) * COALESCE(
+          nav_per_share_at,
+          (SELECT nav_per_share FROM vault_nav_snapshots ORDER BY ts DESC LIMIT 1),
+          1
+        )
+      ), 0) AS total
+      FROM vault_withdrawals
+      WHERE telegram_id=? AND status IN ('queued','processing','completed') AND queued_at >= ?
+    `).get(telegramId, since) as { total: number };
+    return row.total;
+  }
+
   // ── Whitelist changes ─────────────────────────────────────────────────
   enqueueWhitelistChange(args: {
     telegramId: number; oldAddress: string | null; newAddress: string;

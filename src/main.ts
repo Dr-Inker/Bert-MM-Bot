@@ -13,6 +13,7 @@ import { JitoClient } from './jitoClient.js';
 import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
 import { executeRebalance } from './rebalancer.js';
+import { computeNav } from './vault/navSnapshot.js';
 import type { BotState, MidPrice } from './types.js';
 
 const CONFIG_PATH = process.env.BERT_MM_CONFIG ?? '/etc/bert-mm-bot/config.yaml';
@@ -237,12 +238,19 @@ async function main(): Promise<void> {
           const feesUsd = feesBert * (mid?.bertUsd ?? 0) + feesSol * (mid?.solUsd ?? 0);
           feeLine = `Fees: ${feesBert.toFixed(4)} BERT + ${feesSol.toFixed(6)} SOL ($${feesUsd.toFixed(4)})`;
 
-          // Total = free wallet + position + uncollected fees
+          // Total = free wallet + position + uncollected fees (via shared computeNav)
           try {
             const bal = await raydium.getWalletBalances();
-            const freeUsd = (Number(bal.solLamports) / 1e9) * (mid?.solUsd ?? 0) + (Number(bal.bertRaw) / 1e6) * (mid?.bertUsd ?? 0);
-            const totalUsd = freeUsd + position.totalValueUsd + feesUsd;
-            totalLine = `Total holdings: $${totalUsd.toFixed(2)}`;
+            const nav = computeNav({
+              freeSolLamports: bal.solLamports,
+              freeBertRaw: bal.bertRaw,
+              positionTotalValueUsd: position.totalValueUsd,
+              uncollectedFeesBert: position.uncollectedFeesBert,
+              uncollectedFeesSol: position.uncollectedFeesSol,
+              solUsd: mid?.solUsd ?? 0,
+              bertUsd: mid?.bertUsd ?? 0,
+            });
+            totalLine = `Total holdings: $${nav.totalUsd.toFixed(2)}`;
           } catch { /* skip */ }
         }
 

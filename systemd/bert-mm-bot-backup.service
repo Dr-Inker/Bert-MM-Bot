@@ -1,0 +1,9 @@
+[Unit]
+Description=bert-mm-bot SQLite backup
+After=bert-mm-bot.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bert-mm-bot/scripts/backup-state.sh
+User=bertmm
+Group=bertmm

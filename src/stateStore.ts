@@ -108,6 +108,27 @@ export class StateStore {
     return row?.value === '1';
   }
 
+  setFlag(key: string, value: string, reason?: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO flags(key,value,updated_at,reason) VALUES(?,?,?,?)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at,reason=excluded.reason`,
+      )
+      .run(key, value, Date.now(), reason ?? null);
+  }
+
+  getFlag(key: string): string | undefined {
+    const row = this.db.prepare(`SELECT value FROM flags WHERE key=?`).get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value;
+  }
+
+  /** Run `fn` in a SQLite transaction. Throws on error, rolling back. */
+  withTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   recordOperatorAction(a: OperatorAction): void {
     this.db
       .prepare('INSERT INTO operator_actions (ts, command, os_user) VALUES (@ts, @command, @osUser)')

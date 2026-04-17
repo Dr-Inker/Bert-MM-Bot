@@ -79,3 +79,24 @@ describe('StateStore', () => {
     reopened.close();
   });
 });
+
+describe('withTransaction', () => {
+  it('commits both writes atomically on success', () => {
+    store.withTransaction(() => {
+      store.setFlag('a', '1');
+      store.setFlag('b', '2');
+    });
+    expect(store.getFlag('a')).toBe('1');
+    expect(store.getFlag('b')).toBe('2');
+  });
+
+  it('rolls back both writes on thrown error', () => {
+    expect(() =>
+      store.withTransaction(() => {
+        store.setFlag('x', '1');
+        throw new Error('boom');
+      }),
+    ).toThrow('boom');
+    expect(store.getFlag('x')).toBeUndefined();
+  });
+});

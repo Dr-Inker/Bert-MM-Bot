@@ -77,12 +77,10 @@ export function makeFetchers(raydium: VenueClient, poolAddress: string) {
             quoteToken?: { address: string };
           }>;
         };
-        // Search by pool address across all DEXes (supports Raydium, Meteora, etc.)
-        let target = data.pairs.find((p) => p.pairAddress === poolAddress);
-        // Fallback: use highest-volume pool for this token if our pool isn't listed yet
-        if (!target && data.pairs.length > 0) {
-          target = data.pairs[0]; // DexScreener returns sorted by volume desc
-        }
+        // Always use the highest-volume pool for price discovery (pairs[0] is
+        // sorted by volume desc).  Our own pool is too thin to be a reliable
+        // price source — using it would poison the oracle.
+        let target = data.pairs.length > 0 ? data.pairs[0] : undefined;
         if (!target || !target.priceUsd) return null;
         const bertUsd = Number(target.priceUsd);
         // Derive solUsd from priceNative if available

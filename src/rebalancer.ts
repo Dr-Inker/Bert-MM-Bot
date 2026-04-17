@@ -191,13 +191,10 @@ export async function executeRebalance(
           }
         }
       } catch (swapErr) {
-        if (!currentPosition) {
-          // Initial position open on an empty pool — swap fails because no liquidity.
-          // Proceed with whatever balance we have; DLMM supports single-sided deposits.
-          logger.warn({ err: swapErr }, 'swap-to-ratio failed on initial open — depositing available balances');
-        } else {
-          throw swapErr; // Re-throw for rebalance (not initial open)
-        }
+        // Swap fails when we are the sole LP — after closing our position, there is
+        // no remaining liquidity to swap against. Proceed with available balances;
+        // DLMM supports deposits at any ratio.
+        logger.warn({ err: swapErr }, 'swap-to-ratio failed — depositing available balances');
       }
     }
 

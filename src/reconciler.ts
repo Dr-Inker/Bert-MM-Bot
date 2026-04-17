@@ -6,11 +6,13 @@ export type ReconcileResult =
   | { kind: 'OK_MATCH' }
   | { kind: 'MISMATCH'; reason: string };
 
-// Tick-to-USD conversion introduces rounding; use relative tolerance of 2%
+// USD bounds drift with SOL/USD price changes between restarts.
+// Use 10% tolerance to accommodate typical volatility windows.
 function approxEqual(a: number, b: number): boolean {
   if (a === 0 && b === 0) return true;
+  if (a === 0 || b === 0) return false; // one side zero = bad data
   const denom = Math.max(Math.abs(a), Math.abs(b));
-  return Math.abs(a - b) / denom < 0.02;
+  return Math.abs(a - b) / denom < 0.10;
 }
 
 export function reconcile(

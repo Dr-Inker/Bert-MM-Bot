@@ -4,6 +4,7 @@ import { loadConfigFromFile } from './config.js';
 import { logger } from './logger.js';
 import { StateStore } from './stateStore.js';
 import { Notifier } from './notifier.js';
+import { TelegramCommander } from './telegramCommander.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -68,6 +69,17 @@ async function main(): Promise<void> {
   };
 
   const priceHistory: MidPrice[] = [];
+  // Start Telegram command listener (if configured)
+  if (cfg.notifier?.telegram) {
+    const tgCmd = new TelegramCommander(
+      cfg.notifier.telegram.botToken,
+      cfg.notifier.telegram.chatIdInfo,
+      CONFIG_PATH,
+      state,
+    );
+    tgCmd.start();
+  }
+
   let lastHourlyReport = new Date().getUTCHours(); // skip immediate report on startup
   let ticksInRange = 0;
   let ticksTotal = 0;
@@ -78,7 +90,13 @@ async function main(): Promise<void> {
   while (true) {
     const tickStart = Date.now();
     try {
-      const killSwitchTripped = existsSync(cfg.killSwitchFilePath) || !cfg.enabled;
+      // Re-read enabled flag from config each tick (supports live pause/resume)
+      let liveEnabled = cfg.enabled;
+      try {
+        const liveCfg = loadConfigFromFile(CONFIG_PATH);
+        liveEnabled = liveCfg.enabled;
+      } catch { /* use startup value on read failure */ }
+      const killSwitchTripped = existsSync(cfg.killSwitchFilePath) || !liveEnabled;
 
       const samples = await fetchAllSources(fetchers);
       const solUsd = samples.find((s) => s.solUsd > 0)?.solUsd ?? 150;

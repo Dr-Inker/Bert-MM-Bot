@@ -202,6 +202,30 @@ export class CommandHandlers {
     );
   }
 
+  // ── /stats (public) ───────────────────────────────────────────────────
+  async handleStats(msg: { chatId: number }): Promise<void> {
+    const nav = this.deps.getNav();
+    const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
+    const now = this.deps.nowMs();
+    const prior = this.deps.store.navSnapshotAtOrBefore(now - 24 * 3600 * 1000);
+    let deltaLine: string;
+    if (prior && prior.navPerShare > 0) {
+      const pct = (navPerShare - prior.navPerShare) / prior.navPerShare * 100;
+      const sign = pct >= 0 ? '+' : '';
+      deltaLine = `24h: ${sign}${pct.toFixed(2)}%`;
+    } else {
+      deltaLine = `24h: —`;
+    }
+    const tvlStr = nav.totalUsd.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    await this.deps.reply(
+      msg.chatId,
+      `BERT Vault stats\n` +
+        `TVL: $${tvlStr}\n` +
+        `NAV/share: $${navPerShare.toFixed(2)}\n` +
+        deltaLine,
+    );
+  }
+
   // ── /withdraw ─────────────────────────────────────────────────────────
   async handleWithdraw(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);

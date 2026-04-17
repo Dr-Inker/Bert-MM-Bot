@@ -411,3 +411,38 @@ describe('CommandHandlers — /withdraw', () => {
     expect(queued[0]!.sharesBurned).toBeCloseTo(50, 2);
   });
 });
+
+describe('CommandHandlers — /stats (public)', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('returns TVL + NAV/share from live NAV; no 24h snapshot → delta shown as —', async () => {
+    h.navProvider.totalUsd = 2000;
+    h.navProvider.totalShares = 1000;
+
+    await h.handlers.handleStats({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/TVL/i);
+    expect(text).toMatch(/\$2,?000/);
+    expect(text).toMatch(/NAV/i);
+    expect(text).toMatch(/\$2\.00/);
+    // No 24h snapshot present
+    expect(text).toMatch(/24h.*—|—.*24h/i);
+  });
+
+  it('with 24h snapshot: shows delta', async () => {
+    h.navProvider.totalUsd = 2200;
+    h.navProvider.totalShares = 1000;
+    // Snapshot from ~24h ago with navPerShare=2.0; live is 2.2 → +10%
+    h.store.insertNavSnapshot({
+      ts: h.nowRef.current - 24 * 3600 * 1000,
+      totalValueUsd: 2000, totalShares: 1000, navPerShare: 2.0, source: 'hourly',
+    });
+
+    await h.handlers.handleStats({ chatId: 5, userId: 7 });
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/\+10\.0?0?%|10\.0?0?%/);
+  });
+});

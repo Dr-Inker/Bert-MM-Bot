@@ -18,6 +18,7 @@ import { OperatorCommandHandlers } from './vault/operatorCommands.js';
 import { AuditLog } from './vault/audit.js';
 import { loadMasterKey } from './vault/encryption.js';
 import { DepositWatcher } from './vault/depositWatcher.js';
+import { preflightVaultAta } from './vault/preflight.js';
 import { CreditEngine } from './vault/creditEngine.js';
 import { DepositPipeline } from './vault/depositPipeline.js';
 import { WithdrawalExecutor } from './vault/withdrawalExecutor.js';
@@ -220,6 +221,26 @@ async function main(): Promise<void> {
           // land. Uses the payer keypair to cover the account-create rent; the
           // ATA is idempotent so this is safe to call unconditionally.
           const bertMintPk = new PublicKey(cfg.bertMint);
+
+          // N9: preflight the main wallet's BERT ATA. If missing, every sweep
+          // fails CPI and deposits loop forever. Fail-closed: surface the
+          // error by rethrowing so the enclosing try/catch disables vault.
+          const preflight = await preflightVaultAta({
+            connection: raydium.getConnection(),
+            payer,
+            bertMint: bertMintPk,
+          });
+          if (preflight.created) {
+            logger.info(
+              { mainAta: preflight.ata },
+              'vault: N9 preflight — main wallet BERT ATA created',
+            );
+          } else {
+            logger.info(
+              { mainAta: preflight.ata },
+              'vault: N9 preflight — main wallet BERT ATA already exists',
+            );
+          }
           const ensureAta = async (addr: string): Promise<void> => {
             try {
               const owner = new PublicKey(addr);

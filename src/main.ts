@@ -367,13 +367,59 @@ async function main(): Promise<void> {
             executor: withdrawalExecutor,
           };
 
-          const getNav = (): { totalUsd: number; totalShares: number } => {
+          // N6: /balance, /stats, /withdraw must see LIVE NAV, not the last
+          // snapshot (snapshots are only written on deposit, withdrawal, and
+          // the hourly tick). Compute fresh here using the same math as the
+          // hourly-report vault-stats block. N5: spendable SOL excludes
+          // reserve. On any error (RPC / oracle), fall back to the latest
+          // snapshot so the UI stays usable.
+          const snapshotFallback = (): { totalUsd: number; totalShares: number } | null => {
             const snap = depositorStoreLocal.latestNavSnapshot();
-            const totalShares = depositorStoreLocal.totalShares();
-            if (snap) {
-              return { totalUsd: snap.totalValueUsd, totalShares };
+            if (!snap) return null;
+            return {
+              totalUsd: snap.totalValueUsd,
+              totalShares: depositorStoreLocal.totalShares(),
+            };
+          };
+          const getNav = async (): Promise<{ totalUsd: number; totalShares: number } | null> => {
+            try {
+              const last = priceHistory[priceHistory.length - 1];
+              if (!last) return snapshotFallback();
+              const bal = await raydium.getWalletBalances();
+              const stored = state.getCurrentPosition();
+              let posValueUsd = 0;
+              let feesBert = 0n;
+              let feesSol = 0n;
+              if (stored) {
+                try {
+                  const pos = await raydium.getPosition(stored.nftMint, last.solUsd);
+                  posValueUsd = pos?.totalValueUsd ?? 0;
+                  feesBert = pos?.uncollectedFeesBert ?? 0n;
+                  feesSol = pos?.uncollectedFeesSol ?? 0n;
+                } catch {
+                  // Keep zeros; fallback absorbs the gap.
+                }
+              }
+              const reserve = BigInt(cfg.minSolFloorLamports);
+              const spendableSol = bal.solLamports > reserve
+                ? bal.solLamports - reserve
+                : 0n;
+              const live = computeNav({
+                freeSolLamports: spendableSol,
+                freeBertRaw: bal.bertRaw,
+                positionTotalValueUsd: posValueUsd,
+                uncollectedFeesBert: feesBert,
+                uncollectedFeesSol: feesSol,
+                solUsd: last.solUsd,
+                bertUsd: last.bertUsd,
+              });
+              return {
+                totalUsd: live.totalUsd,
+                totalShares: depositorStoreLocal.totalShares(),
+              };
+            } catch {
+              return snapshotFallback();
             }
-            return { totalUsd: 0, totalShares };
           };
           const handlers = new CommandHandlers({
             store: depositorStoreLocal,

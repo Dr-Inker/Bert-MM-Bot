@@ -30,9 +30,12 @@ export interface CommandsDeps {
   config: CommandsConfig;
   /**
    * Return the current total NAV (USD) and total shares. For /balance + /stats.
-   * In main.ts this closes over venue + store.
+   * In main.ts this closes over venue + store and computes a LIVE NAV (fresh
+   * balance + position value + current mid) rather than the last snapshot —
+   * see N6 in the security review. Falls back to the latest snapshot when
+   * any dependency (RPC, oracle) is momentarily unavailable.
    */
-  getNav: () => { totalUsd: number; totalShares: number };
+  getNav: () => Promise<{ totalUsd: number; totalShares: number } | null>;
   nowMs: () => number;
   /**
    * Optional TOTP rate limiter. If omitted, a limiter with default
@@ -392,7 +395,11 @@ export class CommandHandlers {
       return;
     }
     const shares = this.deps.store.getShares(msg.userId);
-    const nav = this.deps.getNav();
+    const nav = await this.deps.getNav();
+    if (!nav) {
+      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      return;
+    }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     const usd = usdForShares({ netShares: shares, navPerShare });
     this.audit.write({
@@ -407,7 +414,11 @@ export class CommandHandlers {
 
   // ── /stats (public) ───────────────────────────────────────────────────
   async handleStats(msg: { chatId: number }): Promise<void> {
-    const nav = this.deps.getNav();
+    const nav = await this.deps.getNav();
+    if (!nav) {
+      await this.deps.reply(msg.chatId, 'BERT Vault stats unavailable — try again shortly.');
+      return;
+    }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     const now = this.deps.nowMs();
     const prior = this.deps.store.navSnapshotAtOrBefore(now - 24 * 3600 * 1000);
@@ -449,7 +460,11 @@ export class CommandHandlers {
     }
 
     // Compute the user's available USD up-front so we can parse percentage.
-    const nav = this.deps.getNav();
+    const nav = await this.deps.getNav();
+    if (!nav) {
+      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      return;
+    }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     const shares = this.deps.store.getShares(msg.userId);
     const userUsd = usdForShares({ netShares: shares, navPerShare });
@@ -535,7 +550,11 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'No whitelist address set.');
       return;
     }
-    const nav = this.deps.getNav();
+    const nav = await this.deps.getNav();
+    if (!nav) {
+      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      return;
+    }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     if (navPerShare <= 0) {
       await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');

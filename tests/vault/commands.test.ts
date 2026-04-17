@@ -46,7 +46,7 @@ function buildHarness(): Harness {
   const handlers = new CommandHandlers({
     store, enrollment, cooldowns, masterKey: MASTER_KEY, reply,
     config: makeConfig(),
-    getNav: () => navProvider,
+    getNav: async () => navProvider,
     nowMs: () => nowRef.current,
   });
   return { dir, state, store, enrollment, cooldowns, reply, handlers, navProvider, nowRef };
@@ -303,6 +303,69 @@ describe('CommandHandlers — /balance', () => {
     const [, text] = h.reply.mock.calls[0];
     expect(text).toMatch(/invalid|failed/i);
   });
+
+  // N6: /balance reads live NAV (freshly awaited), not a cached value.
+  it('N6: /balance reflects the latest NAV returned by getNav (live, not stale)', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.addShares(7, 100);
+    // Initial NAV: $100 total → $1.00/share → user has $100.
+    h.navProvider.totalUsd = 100;
+    h.navProvider.totalShares = 100;
+
+    await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+    h.reply.mockClear();
+
+    // Mutate nav between /balance and the TOTP reply; the handler should
+    // see the NEW value because it awaits getNav() afresh on every call.
+    h.navProvider.totalUsd = 500;
+    h.navProvider.totalShares = 100;
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    // User value now $500 (100 shares * $5.00/share), not $100.
+    expect(text).toMatch(/\$500(\.00)?/);
+    expect(text).not.toMatch(/\$100(\.00)?\b/);
+  });
+
+  // N6: /balance replies gracefully when getNav is null (e.g., RPC + snapshot both unavailable).
+  it('N6: /balance replies "NAV unavailable" if getNav returns null', async () => {
+    const secret = await enrollFully(h, 7);
+    h.store.addShares(7, 100);
+    // Swap in a nav provider that returns null.
+    const state2 = h.state;
+    const store2 = h.store;
+    const enr2 = h.enrollment;
+    const cd2 = h.cooldowns;
+    const reply2 = vi.fn(async () => {});
+    const nowRef2 = { current: 1_000_000 };
+    const handlers2 = new CommandHandlers({
+      store: store2, enrollment: enr2, cooldowns: cd2,
+      masterKey: MASTER_KEY, reply: reply2,
+      config: makeConfig(),
+      getNav: async () => null,
+      nowMs: () => nowRef2.current,
+    });
+    void state2;
+
+    await handlers2.handleBalance({ chatId: 5, userId: 7 });
+    reply2.mockClear();
+
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await handlers2.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+
+    expect(reply2).toHaveBeenCalledTimes(1);
+    const [, text] = reply2.mock.calls[0];
+    expect(text).toMatch(/NAV unavailable|try again/i);
+  });
 });
 
 describe('CommandHandlers — /setwhitelist + /cancelwhitelist', () => {
@@ -502,7 +565,7 @@ describe('CommandHandlers — /withdraw', () => {
         maxDailyWithdrawalUsdPerUser: 500,
         maxPendingWithdrawals: 20,
       },
-      getNav: () => navProvider,
+      getNav: async () => navProvider,
       nowMs: () => nowRef.current,
     });
     try {

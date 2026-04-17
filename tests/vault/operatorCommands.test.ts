@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { StateStore } from '../../src/stateStore.js';
 import { DepositorStore } from '../../src/vault/depositorStore.js';
 import { AuditLog } from '../../src/vault/audit.js';
+import { CreditEngine } from '../../src/vault/creditEngine.js';
 import { OperatorCommandHandlers } from '../../src/vault/operatorCommands.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ interface Harness {
   reply: ReturnType<typeof vi.fn>;
   handlers: OperatorCommandHandlers;
   nowRef: { current: number };
+  midRef: { current: { solUsd: number; bertUsd: number } | null };
 }
 
 function buildHarness(): Harness {
@@ -25,14 +27,20 @@ function buildHarness(): Harness {
   const audit = new AuditLog(store);
   const reply = vi.fn(async () => {});
   const nowRef = { current: 1_700_000_000_000 };
+  const midRef: { current: { solUsd: number; bertUsd: number } | null } = {
+    current: { solUsd: 100, bertUsd: 0.01 },
+  };
+  const creditEngine = new CreditEngine({ store });
   const handlers = new OperatorCommandHandlers({
     store,
     state,
     audit,
     reply,
     nowMs: () => nowRef.current,
+    creditEngine,
+    getMid: async () => midRef.current,
   });
-  return { dir, state, store, audit, reply, handlers, nowRef };
+  return { dir, state, store, audit, reply, handlers, nowRef, midRef };
 }
 
 function seedUser(store: DepositorStore, telegramId: number, addr = `Addr${telegramId}`): void {
@@ -257,5 +265,142 @@ describe('OperatorCommandHandlers — /forceprocess', () => {
     const [, text] = h.reply.mock.calls[0];
     expect(text).toMatch(/tx_sig|on-chain|reconcile/i);
     expect(h.store.getWithdrawalById(id)!.status).toBe('failed');
+  });
+});
+
+describe('OperatorCommandHandlers — /recreditdeposit (N2)', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  function seedSweptNoCreditAudit(
+    store: DepositorStore,
+    opts: {
+      telegramId: number; inboundTxSig: string; sweepTxSig: string;
+      solLamports: bigint; bertRaw: bigint; ts: number;
+    },
+  ): void {
+    store.writeAudit({
+      ts: opts.ts,
+      telegramId: opts.telegramId,
+      event: 'deposit_detected',
+      detailsJson: JSON.stringify({
+        inboundTxSig: opts.inboundTxSig,
+        solLamports: opts.solLamports.toString(),
+        bertRaw: opts.bertRaw.toString(),
+      }),
+    });
+    store.writeAudit({
+      ts: opts.ts + 1,
+      telegramId: opts.telegramId,
+      event: 'deposit_swept',
+      detailsJson: JSON.stringify({
+        inboundTxSig: opts.inboundTxSig,
+        sweepTxSig: opts.sweepTxSig,
+        solLamports: opts.solLamports.toString(),
+        bertRaw: opts.bertRaw.toString(),
+        confirmedAt: opts.ts - 10,
+      }),
+    });
+  }
+
+  it('/recreditdeposit without sig replies usage', async () => {
+    await h.handlers.handleRecreditDeposit({ chatId: 99, userId: 99, text: '/recreditdeposit' });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/usage|inboundTxSig/i);
+  });
+
+  it('/recreditdeposit re-mints shares for a swept but uncredited deposit', async () => {
+    seedUser(h.store, 42);
+    seedSweptNoCreditAudit(h.store, {
+      telegramId: 42,
+      inboundTxSig: 'INBOUND_A',
+      sweepTxSig: 'SWEEP_A',
+      solLamports: 1_000_000_000n,   // 1 SOL = $100
+      bertRaw: 0n,
+      ts: h.nowRef.current - 500,
+    });
+    // No vault_deposits row — sim of the swept-but-not-credited state.
+
+    await h.handlers.handleRecreditDeposit({
+      chatId: 99, userId: 99, text: '/recreditdeposit INBOUND_A',
+    });
+
+    // Shares minted: $100 deposit / nav(default 1.0 from empty vault) = 100
+    expect(h.store.getShares(42)).toBeCloseTo(100);
+    const deposits = h.store.listDepositsForUser(42);
+    expect(deposits).toHaveLength(1);
+    expect(deposits[0].inboundTxSig).toBe('INBOUND_A');
+    expect(deposits[0].sweepTxSig).toBe('SWEEP_A');
+
+    const audit = h.store.listRecentAuditEvents(20).map((e) => e.event);
+    expect(audit).toContain('deposit_recredited');
+
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/Recredited|shares minted/i);
+  });
+
+  it('/recreditdeposit refuses if already credited', async () => {
+    seedUser(h.store, 42);
+    // Seed vault_deposits row directly via creditDeposit
+    h.store.creditDeposit({
+      telegramId: 42,
+      inboundTxSig: 'INBOUND_B',
+      sweepTxSig: 'SWEEP_B',
+      solLamports: 1_000_000_000n,
+      bertRaw: 0n,
+      solUsd: 100, bertUsd: 0.01,
+      navPerShareAt: 1,
+      sharesMinted: 100,
+      confirmedAt: h.nowRef.current - 1000,
+      sweptAt: h.nowRef.current - 500,
+    });
+
+    await h.handlers.handleRecreditDeposit({
+      chatId: 99, userId: 99, text: '/recreditdeposit INBOUND_B',
+    });
+
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/already credited/i);
+
+    // Shares unchanged
+    expect(h.store.getShares(42)).toBe(100);
+
+    // No deposit_recredited audit
+    const audit = h.store.listRecentAuditEvents(20).map((e) => e.event);
+    expect(audit).not.toContain('deposit_recredited');
+  });
+
+  it('/recreditdeposit replies gracefully when no detect audit exists', async () => {
+    await h.handlers.handleRecreditDeposit({
+      chatId: 99, userId: 99, text: '/recreditdeposit INBOUND_UNKNOWN',
+    });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/no deposit_detected|no audit/i);
+  });
+
+  it('/recreditdeposit replies try-again if oracle is unavailable', async () => {
+    seedUser(h.store, 42);
+    seedSweptNoCreditAudit(h.store, {
+      telegramId: 42,
+      inboundTxSig: 'INBOUND_C',
+      sweepTxSig: 'SWEEP_C',
+      solLamports: 500_000_000n,
+      bertRaw: 0n,
+      ts: h.nowRef.current - 500,
+    });
+    h.midRef.current = null;   // oracle down
+
+    await h.handlers.handleRecreditDeposit({
+      chatId: 99, userId: 99, text: '/recreditdeposit INBOUND_C',
+    });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/oracle unavailable|try.*again/i);
+    expect(h.store.getShares(42)).toBe(0);
   });
 });

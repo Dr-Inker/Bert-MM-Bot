@@ -127,9 +127,11 @@ describe('DepositPipeline.onInflow', () => {
     expect(audit).not.toContain('deposit_credited');
   });
 
-  it('swept but oracle unavailable: logs sweep_failed:oracle_unavailable_after_sweep', async () => {
+  it('N2: oracle preflight — defers sweep when oracle is null, does not sweep', async () => {
+    let sweepCalled = false;
     const pipe = makePipeline({
       getMid: async () => null,
+      submitTx: async () => { sweepCalled = true; return 'WOULD_NOT_HAPPEN'; },
     });
     const event: InflowEvent = {
       depositAddress: depositKp.publicKey.toBase58(),
@@ -138,13 +140,18 @@ describe('DepositPipeline.onInflow', () => {
       confirmedAt: 150,
     };
     await pipe.onInflow(event);
+    expect(sweepCalled).toBe(false);
     expect(store.getShares(42)).toBe(0);
+
     const audit = store.listRecentAuditEvents(10);
-    const swept = audit.find(e => e.event === 'deposit_swept');
-    expect(swept).toBeTruthy();
-    const failed = audit.find(e => e.event === 'deposit_sweep_failed');
-    expect(failed).toBeTruthy();
-    expect(failed!.detailsJson).toContain('oracle_unavailable_after_sweep');
+    // deposit_detected is still written (durable record)
+    expect(audit.some((e) => e.event === 'deposit_detected')).toBe(true);
+    // new defer event fires
+    expect(audit.some((e) => e.event === 'deposit_deferred_oracle_unavailable')).toBe(true);
+    // sweep did NOT happen → no deposit_swept
+    expect(audit.some((e) => e.event === 'deposit_swept')).toBe(false);
+    // and no legacy oracle_unavailable_after_sweep reason
+    expect(audit.some((e) => e.event === 'deposit_sweep_failed')).toBe(false);
   });
 
   it('unknown deposit address: logs warning, no-op, no audit rows touched', async () => {

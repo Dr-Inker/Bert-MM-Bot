@@ -23,6 +23,8 @@ export type AuditEvent =
   | 'deposit_detected'
   | 'deposit_swept'
   | 'deposit_sweep_failed'
+  | 'deposit_deferred_oracle_unavailable'
+  | 'deposit_recredited'
   | 'whitelist_activated'
   | 'bootstrap';
 

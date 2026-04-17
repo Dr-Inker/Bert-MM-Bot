@@ -1,8 +1,10 @@
 import type { DepositorStore } from './depositorStore.js';
 import type { StateStore } from '../stateStore.js';
 import type { AuditLog } from './audit.js';
+import type { CreditEngine } from './creditEngine.js';
 import type { ReplyFn } from './commands.js';
 import { VAULT_PAUSED_FLAG } from './flags.js';
+import { computeNavPerShare } from './shareMath.js';
 
 export interface OperatorCommandsDeps {
   store: DepositorStore;
@@ -10,17 +12,31 @@ export interface OperatorCommandsDeps {
   audit: AuditLog;
   reply: ReplyFn;
   nowMs: () => number;
+  /**
+   * Optional — only wired when the full vault runtime is constructed.
+   * /recreditdeposit and /resettotp are no-ops (with a reply) when absent.
+   */
+  creditEngine?: CreditEngine;
+  /**
+   * Optional oracle lookup — used by /recreditdeposit. Returns null when the
+   * oracle is unhealthy. Callers should reply with "try again" in that case.
+   */
+  getMid?: () => Promise<{ solUsd: number; bertUsd: number } | null>;
 }
 
 /**
  * Operator-only vault commands. All are assumed to have been authorized by
  * the caller (TelegramCommander.registerOperatorCommand gates on
- * `chatId === operatorChatId`). No further auth inside the handler.
+ * operator user id). No further auth inside the handler.
  *
- *  /pausevault           — set `vault_paused=1` flag
- *  /resumevault          — clear the flag
- *  /vaultstatus          — TVL + shares + queued count + last NAV + last 5 audit
- *  /forceprocess <id>    — reset a failed withdrawal back to 'queued'
+ *  /pausevault                    — set `vault_paused=1` flag
+ *  /resumevault                   — clear the flag
+ *  /vaultstatus                   — TVL + shares + queued count + last NAV + last 5 audit
+ *  /forceprocess <id>             — reset a failed withdrawal back to 'queued'
+ *  /recreditdeposit <inboundSig>  — break-glass: credit shares for a deposit
+ *                                    that was swept on-chain but never credited
+ *                                    (e.g., DB lock between sweep and credit).
+ *  /resettotp <telegramId>        — wipe a user's TOTP secret so they re-enroll.
  */
 export class OperatorCommandHandlers {
   constructor(private deps: OperatorCommandsDeps) {}
@@ -140,6 +156,182 @@ export class OperatorCommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Withdrawal #${id} reset to queued; will be retried on next drain.`,
+    );
+  }
+
+  /**
+   * /recreditdeposit <inboundTxSig>
+   *
+   * Break-glass recovery for the "swept but not credited" failure mode. The
+   * oracle-preflight fix in onInflow handles the common case (oracle down);
+   * this command handles the rare residual cases (DB lock between sweep and
+   * credit, unexpected error inside creditEngine, etc.).
+   *
+   * The command:
+   *   1. Looks up deposit_detected + deposit_swept audit rows for the sig.
+   *      Both are required — detected carries amounts, swept carries the
+   *      sweepTxSig.
+   *   2. Confirms no vault_deposits row already exists for that sig (if yes,
+   *      replies "already credited" and returns — no-op).
+   *   3. Fetches current mid price and current navPerShare from the store.
+   *   4. Calls creditEngine.credit(...) which writes the vault_deposits row,
+   *      mints shares, writes NAV snapshot, and writes deposit_credited audit.
+   *   5. Emits an additional deposit_recredited audit naming the operator.
+   */
+  async handleRecreditDeposit(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    const parts = msg.text.trim().split(/\s+/);
+    const inboundTxSig = parts[1];
+    if (!inboundTxSig) {
+      await this.deps.reply(
+        msg.chatId,
+        'Usage: /recreditdeposit <inboundTxSig>',
+      );
+      return;
+    }
+    if (!this.deps.creditEngine || !this.deps.getMid) {
+      await this.deps.reply(
+        msg.chatId,
+        'Recredit is not wired in this environment (missing creditEngine/getMid).',
+      );
+      return;
+    }
+
+    // Already credited? vault_deposits has UNIQUE(inbound_tx_sig).
+    if (this.deps.store.hasDeposit(inboundTxSig)) {
+      await this.deps.reply(
+        msg.chatId,
+        `Deposit ${inboundTxSig} already credited — nothing to do.`,
+      );
+      return;
+    }
+
+    // Pull audit events for this sig. Scan a window large enough to catch
+    // the detect + sweep pair; the caller invokes this shortly after the
+    // failure (operator intervention is on the order of minutes-to-hours).
+    // We use listRecentAuditEvents to walk newest-first; match on the sig
+    // inside detailsJson.
+    const recent = this.deps.store.listRecentAuditEvents(5000);
+    let detectedJson: any = null;
+    let sweptJson: any = null;
+    let telegramId: number | null = null;
+    for (const e of recent) {
+      if (e.event !== 'deposit_detected' && e.event !== 'deposit_swept') continue;
+      let parsed: any;
+      try { parsed = JSON.parse(e.detailsJson); } catch { continue; }
+      if (parsed?.inboundTxSig !== inboundTxSig) continue;
+      if (e.event === 'deposit_detected' && detectedJson === null) {
+        detectedJson = parsed;
+        telegramId = e.telegramId;
+      }
+      if (e.event === 'deposit_swept' && sweptJson === null) {
+        sweptJson = parsed;
+        if (telegramId === null) telegramId = e.telegramId;
+      }
+      if (detectedJson && sweptJson) break;
+    }
+    if (!detectedJson) {
+      await this.deps.reply(
+        msg.chatId,
+        `No deposit_detected audit for ${inboundTxSig}.`,
+      );
+      return;
+    }
+    if (!sweptJson) {
+      await this.deps.reply(
+        msg.chatId,
+        `Found deposit_detected but no deposit_swept for ${inboundTxSig} — sweep may not have landed. Investigate the deposit address balance before recrediting.`,
+      );
+      return;
+    }
+    if (telegramId === null) {
+      await this.deps.reply(msg.chatId, 'Could not infer telegramId from audit rows.');
+      return;
+    }
+    const sweepTxSig: string | undefined =
+      typeof sweptJson.sweepTxSig === 'string' ? sweptJson.sweepTxSig : undefined;
+    if (!sweepTxSig) {
+      await this.deps.reply(msg.chatId, 'deposit_swept audit row has no sweepTxSig.');
+      return;
+    }
+
+    // Amounts live in deposit_detected (canonical) but deposit_swept now also
+    // includes them after N2 — prefer whichever is present.
+    const pickBigint = (...vals: any[]): bigint | null => {
+      for (const v of vals) {
+        if (v === undefined || v === null) continue;
+        try { return BigInt(String(v)); } catch { continue; }
+      }
+      return null;
+    };
+    const solLamports = pickBigint(detectedJson.solLamports, sweptJson.solLamports);
+    const bertRaw = pickBigint(detectedJson.bertRaw, sweptJson.bertRaw);
+    if (solLamports === null || bertRaw === null) {
+      await this.deps.reply(msg.chatId, 'Could not parse amounts from audit rows.');
+      return;
+    }
+    const confirmedAt: number | undefined =
+      typeof sweptJson.confirmedAt === 'number' ? sweptJson.confirmedAt : undefined;
+
+    const mid = await this.deps.getMid();
+    if (!mid) {
+      await this.deps.reply(
+        msg.chatId,
+        'Oracle unavailable — try /recreditdeposit again when the oracle recovers.',
+      );
+      return;
+    }
+    const snap = this.deps.store.latestNavSnapshot();
+    const navPerShare = computeNavPerShare({
+      totalUsd: snap?.totalValueUsd ?? 0,
+      totalShares: this.deps.store.totalShares(),
+    });
+
+    try {
+      this.deps.creditEngine.credit({
+        telegramId,
+        inboundTxSig,
+        sweepTxSig,
+        solLamports,
+        bertRaw,
+        solUsd: mid.solUsd,
+        bertUsd: mid.bertUsd,
+        navPerShareAtDeposit: navPerShare,
+        confirmedAt: confirmedAt ?? this.deps.nowMs(),
+        sweptAt: this.deps.nowMs(),
+        now: this.deps.nowMs(),
+      });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      // UNIQUE(inbound_tx_sig) race — treat as "already credited".
+      if (/UNIQUE/i.test(reason)) {
+        await this.deps.reply(msg.chatId, `Deposit ${inboundTxSig} already credited (race).`);
+        return;
+      }
+      await this.deps.reply(msg.chatId, `Recredit failed: ${reason}`);
+      return;
+    }
+
+    const deposits = this.deps.store.listDepositsForUser(telegramId);
+    const matchingDeposit = deposits.find((d) => d.inboundTxSig === inboundTxSig);
+    const sharesMinted = matchingDeposit?.sharesMinted ?? 0;
+
+    this.deps.audit.write({
+      ts: this.deps.nowMs(),
+      telegramId: msg.userId,
+      event: 'deposit_recredited',
+      details: {
+        inboundTxSig,
+        sweepTxSig,
+        targetTelegramId: telegramId,
+        sharesMinted,
+        navPerShare,
+      },
+    });
+    await this.deps.reply(
+      msg.chatId,
+      `Recredited deposit ${inboundTxSig}: ${sharesMinted.toFixed(4)} shares minted to user ${telegramId} at NAV/share $${navPerShare.toFixed(6)}.`,
     );
   }
 }

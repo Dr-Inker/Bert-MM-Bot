@@ -393,11 +393,17 @@ async function main(): Promise<void> {
             audit: new AuditLog(depositorStoreLocal),
             reply: (chatId, text) => tgCmd.reply(chatId, text),
             nowMs: () => Date.now(),
+            creditEngine,
+            getMid: async () => {
+              const last = priceHistory[priceHistory.length - 1];
+              return last ? { solUsd: last.solUsd, bertUsd: last.bertUsd } : null;
+            },
           });
           tgCmd.registerOperatorCommand('pausevault', (msg) => operatorHandlers.handlePause(msg));
           tgCmd.registerOperatorCommand('resumevault', (msg) => operatorHandlers.handleResume(msg));
           tgCmd.registerOperatorCommand('vaultstatus', (msg) => operatorHandlers.handleStatus(msg));
           tgCmd.registerOperatorCommand('forceprocess', (msg) => operatorHandlers.handleForceProcess(msg));
+          tgCmd.registerOperatorCommand('recreditdeposit', (msg) => operatorHandlers.handleRecreditDeposit(msg));
           logger.info('vault commands wired into telegram commander');
         } catch (e) {
           logger.error({ err: e }, 'vault wiring failed — vault commands disabled');

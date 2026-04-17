@@ -76,6 +76,26 @@ export class DepositPipeline {
       }),
     });
 
+    // N2: Preflight the oracle BEFORE sweeping. If the oracle is unhealthy we
+    // cannot compute a NAV/share to credit shares against, and sweeping first
+    // would leave funds stuck in the main wallet with no way to retry (the
+    // deposit address is drained). Defer by returning — the watcher will
+    // re-emit the same inboundTxSig on the next poll and we'll try again.
+    const preflightMid = await this.deps.getMid();
+    if (!preflightMid) {
+      this.deps.log.warn(
+        { telegramId: user.telegramId, inboundTxSig: event.inboundTxSig },
+        'deposit: oracle unhealthy — deferring sweep until oracle recovers',
+      );
+      this.deps.store.writeAudit({
+        ts: this.deps.now(),
+        telegramId: user.telegramId,
+        event: 'deposit_deferred_oracle_unavailable',
+        detailsJson: JSON.stringify({ inboundTxSig: event.inboundTxSig }),
+      });
+      return;
+    }
+
     // Decrypt the deposit keypair for signing.
     const secrets = this.deps.store.getUserSecrets(user.telegramId);
     if (!secrets) {
@@ -133,11 +153,19 @@ export class DepositPipeline {
       return;
     }
     const sweptAt = this.deps.now();
+    // N2: include amounts in deposit_swept so /recreditdeposit can recover
+    // without needing to cross-reference deposit_detected for the figures.
     this.deps.store.writeAudit({
       ts: sweptAt,
       telegramId: user.telegramId,
       event: 'deposit_swept',
-      detailsJson: JSON.stringify({ inboundTxSig: event.inboundTxSig, sweepTxSig: sweepSig }),
+      detailsJson: JSON.stringify({
+        inboundTxSig: event.inboundTxSig,
+        sweepTxSig: sweepSig,
+        solLamports: event.solLamports.toString(),
+        bertRaw: event.bertRaw.toString(),
+        confirmedAt: event.confirmedAt,
+      }),
     });
 
     // Oracle snapshot for USD conversion + NAV per share.

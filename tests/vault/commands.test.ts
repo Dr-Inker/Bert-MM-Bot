@@ -596,3 +596,147 @@ describe('CommandHandlers — /stats (public)', () => {
     expect(text).toMatch(/\+10\.0?0?%|10\.0?0?%/);
   });
 });
+
+describe('CommandHandlers — TOTP rate limiting', () => {
+  let h: Harness;
+  beforeEach(() => { h = buildHarness(); });
+  afterEach(() => { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); });
+
+  it('5 consecutive bad codes trip lockout; emits totp_rate_limited with until', async () => {
+    await enrollFully(h, 7);
+
+    // Four bad codes: each replies "invalid", no lockout yet.
+    for (let i = 0; i < 4; i++) {
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      expect(h.handlers.pendingFor(7)?.kind).toBe('deposit_reveal');
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+      const lastReply = h.reply.mock.calls.at(-1)?.[1] ?? '';
+      expect(lastReply).toMatch(/invalid/i);
+    }
+    // No lockout audit yet.
+    let auditRows = h.store.listAudit({ sinceTs: 0, limit: 200 });
+    expect(auditRows.some((r) => r.event === 'totp_rate_limited')).toBe(false);
+    expect(auditRows.filter((r) => r.event === 'totp_verify_failed').length).toBe(4);
+
+    // Fifth bad code trips lockout.
+    await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    const lockedReply = h.reply.mock.calls.at(-1)?.[1] ?? '';
+    expect(lockedReply).toMatch(/locked/i);
+    expect(lockedReply).toMatch(/\d+m\s+\d+s/);
+
+    auditRows = h.store.listAudit({ sinceTs: 0, limit: 200 });
+    const rlRows = auditRows.filter((r) => r.event === 'totp_rate_limited');
+    expect(rlRows.length).toBe(1);
+    const details = JSON.parse(rlRows[0]!.detailsJson ?? '{}');
+    expect(typeof details.until).toBe('number');
+    expect(details.until).toBeGreaterThan(h.nowRef.current);
+    // The final verify also recorded a totp_verify_failed before tripping.
+    expect(auditRows.filter((r) => r.event === 'totp_verify_failed').length).toBe(5);
+  });
+
+  it('during lockout, /deposit replies with lockout message and does not set pending', async () => {
+    await enrollFully(h, 7);
+    // Force a lockout by burning 5 bad codes.
+    for (let i = 0; i < 5; i++) {
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    }
+    // Pending should be undefined after the 5th attempt cleared it.
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    h.reply.mockClear();
+
+    // Now a fresh /deposit attempt during lockout:
+    await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/locked/i);
+    expect(text).toMatch(/\d+m\s+\d+s/);
+    // No pending action was set — the handler refuses at dispatch time.
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+  });
+
+  it('during lockout, /balance /withdraw /setwhitelist /cancelwhitelist all refuse', async () => {
+    const ADDR = '7BZ16d4tgebvQ7j59tY1QkwCQ4xd6tqN9GzdAH9v1arF';
+    await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: ADDR, ts: 100 });
+    h.store.addShares(7, 100);
+    h.navProvider.totalUsd = 200;
+    h.navProvider.totalShares = 100;
+    // Burn 5 bad codes to lock the user.
+    for (let i = 0; i < 5; i++) {
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    }
+    h.reply.mockClear();
+
+    await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.reply.mock.calls.at(-1)?.[1]).toMatch(/locked/i);
+
+    await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 50' });
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.reply.mock.calls.at(-1)?.[1]).toMatch(/locked/i);
+
+    await h.handlers.handleSetWhitelist({ chatId: 5, userId: 7, text: `/setwhitelist ${ADDR}` });
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.reply.mock.calls.at(-1)?.[1]).toMatch(/locked/i);
+
+    await h.handlers.handleCancelWhitelist({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    expect(h.reply.mock.calls.at(-1)?.[1]).toMatch(/locked/i);
+  });
+
+  it('successful TOTP clears the failure counter; next bad code does not trip lockout', async () => {
+    const secret = await enrollFully(h, 7);
+    // Burn 4 bad codes (one shy of lockout).
+    for (let i = 0; i < 4; i++) {
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    }
+
+    // Now a valid code should reset the counter.
+    await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('deposit_reveal');
+    const restore = advancePastNextTotpStep();
+    try {
+      const code = await totpCodeFor(secret);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+    } finally { restore(); }
+    // Depicts a successful reveal, not a lockout.
+    expect(h.reply.mock.calls.at(-1)?.[1]).not.toMatch(/locked/i);
+
+    // Now one more bad code should NOT trip the lockout — the counter was cleared.
+    await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    const lastReply = h.reply.mock.calls.at(-1)?.[1] ?? '';
+    expect(lastReply).toMatch(/invalid/i);
+    expect(lastReply).not.toMatch(/locked/i);
+
+    // No totp_rate_limited audit event was ever emitted.
+    const auditRows = h.store.listAudit({ sinceTs: 0, limit: 200 });
+    expect(auditRows.some((r) => r.event === 'totp_rate_limited')).toBe(false);
+  });
+
+  it('failures older than 15 minutes fall off the rolling window', async () => {
+    await enrollFully(h, 7);
+    // Burn 4 bad codes at t=nowRef.current.
+    for (let i = 0; i < 4; i++) {
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    }
+    // Advance the clock by 15 minutes + 1 second — those 4 failures expire.
+    h.nowRef.current += 15 * 60_000 + 1_000;
+
+    // A fifth bad code should NOT trip the lockout because the prior 4 have
+    // fallen out of the rolling window; this is now the first recent failure.
+    await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });
+    const lastReply = h.reply.mock.calls.at(-1)?.[1] ?? '';
+    expect(lastReply).toMatch(/invalid/i);
+    expect(lastReply).not.toMatch(/locked/i);
+
+    const auditRows = h.store.listAudit({ sinceTs: 0, limit: 200 });
+    expect(auditRows.some((r) => r.event === 'totp_rate_limited')).toBe(false);
+  });
+});

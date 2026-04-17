@@ -6,6 +6,7 @@ import { AuditLog } from './audit.js';
 import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
 import { computeNavPerShare, usdForShares, splitFee } from './shareMath.js';
+import { TotpRateLimiter, formatLockoutRemaining } from './rateLimiter.js';
 import { PublicKey } from '@solana/web3.js';
 
 export interface ReplyFn {
@@ -33,6 +34,12 @@ export interface CommandsDeps {
    */
   getNav: () => { totalUsd: number; totalShares: number };
   nowMs: () => number;
+  /**
+   * Optional TOTP rate limiter. If omitted, a limiter with default
+   * parameters (5 failures / 15-min rolling window → 15-min lockout) is
+   * constructed. Tests may inject a custom limiter to tune window/threshold.
+   */
+  totpRateLimiter?: TotpRateLimiter;
 }
 
 /**
@@ -59,9 +66,82 @@ export class CommandHandlers {
   private pending = new Map<number, PendingAction>();
   private totpSetupFailures = new Map<number, number>();
   private audit: AuditLog;
+  private rateLimiter: TotpRateLimiter;
 
   constructor(private deps: CommandsDeps) {
     this.audit = new AuditLog(deps.store);
+    this.rateLimiter = deps.totpRateLimiter ?? new TotpRateLimiter();
+  }
+
+  /**
+   * If the user is currently locked out, emit a reply with remaining time and
+   * return true. Callers should early-return on true. Does NOT audit — the
+   * `totp_rate_limited` event fires exactly once at lockout onset (inside
+   * `verifyTotpGated`); subsequent rejections are silent beyond the user
+   * reply to avoid spamming the audit log during a sustained attack.
+   */
+  private async rejectIfLocked(
+    chatId: number,
+    userId: number,
+  ): Promise<boolean> {
+    const now = this.deps.nowMs();
+    const until = this.rateLimiter.isLockedOut(userId, now);
+    if (until === null) return false;
+    const remaining = formatLockoutRemaining(until - now);
+    await this.deps.reply(
+      chatId,
+      `Too many failed attempts. Locked for ${remaining}.`,
+    );
+    return true;
+  }
+
+  /**
+   * Verify `code` for `userId` with lockout + audit side effects.
+   * - If the user is already locked, returns `{ ok: false, locked: true, until }`
+   *   without invoking the underlying code verifier.
+   * - On verify failure, records the failure; if this failure trips the
+   *   lockout threshold, emits `totp_rate_limited` (once) and returns with
+   *   `locked: true, until`. Otherwise emits `totp_verify_failed` and returns
+   *   `locked: false`.
+   * - On verify success, clears the user's failure counters.
+   *
+   * `op` is used only for the audit details.
+   */
+  private verifyTotpGated(
+    userId: number,
+    code: string,
+    op: string,
+  ):
+    | { ok: true }
+    | { ok: false; locked: true; until: number }
+    | { ok: false; locked: false } {
+    const now = this.deps.nowMs();
+    const lockedUntil = this.rateLimiter.isLockedOut(userId, now);
+    if (lockedUntil !== null) {
+      return { ok: false, locked: true, until: lockedUntil };
+    }
+    const v = this.verifyTotp(userId, code);
+    if (v.ok) {
+      this.rateLimiter.recordSuccess(userId);
+      return { ok: true };
+    }
+    const r = this.rateLimiter.recordFailure(userId, now);
+    this.audit.write({
+      ts: now,
+      telegramId: userId,
+      event: 'totp_verify_failed',
+      details: { op },
+    });
+    if (r.lockedUntil !== null) {
+      this.audit.write({
+        ts: now,
+        telegramId: userId,
+        event: 'totp_rate_limited',
+        details: { until: r.lockedUntil },
+      });
+      return { ok: false, locked: true, until: r.lockedUntil };
+    }
+    return { ok: false, locked: false };
   }
 
   /** Test accessor — returns what (if any) action is awaiting TOTP for this user. */
@@ -148,6 +228,7 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
       return;
     }
+    if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'deposit_reveal' });
     await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to reveal your deposit address.');
   }
@@ -160,6 +241,18 @@ export class CommandHandlers {
   async handleMessage(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     const pending = this.pending.get(msg.userId);
     if (!pending) return;
+
+    // Rate-limit preflight for any TOTP-consuming pending action. A locked-out
+    // user gets a time-remaining reply; pending is left intact so when the
+    // lockout expires their next code attempt can proceed normally (no state
+    // cleanup needed — the /deposit, /balance, etc. flows only set pending,
+    // they don't perform any irreversible action).
+    if (
+      pending.kind !== 'disclaimer' &&
+      (await this.rejectIfLocked(msg.chatId, msg.userId))
+    ) {
+      return;
+    }
 
     switch (pending.kind) {
       case 'deposit_reveal':
@@ -204,6 +297,7 @@ export class CommandHandlers {
     if (ok) {
       this.pending.delete(msg.userId);
       this.totpSetupFailures.delete(msg.userId);
+      this.rateLimiter.recordSuccess(msg.userId);
       this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
       await this.deps.reply(
         msg.chatId,
@@ -216,6 +310,25 @@ export class CommandHandlers {
       ts: now, telegramId: msg.userId,
       event: 'totp_verify_failed', details: { op: 'totp_setup_confirm', failures },
     });
+    // Setup failures also feed the global rate limiter (cross-counts with
+    // runtime failures). If this failure trips the threshold, emit the
+    // one-shot `totp_rate_limited` event and show the lockout message instead
+    // of the generic "invalid code" reply.
+    const r = this.rateLimiter.recordFailure(msg.userId, now);
+    if (r.lockedUntil !== null) {
+      this.pending.delete(msg.userId);
+      this.totpSetupFailures.delete(msg.userId);
+      this.audit.write({
+        ts: now, telegramId: msg.userId,
+        event: 'totp_rate_limited', details: { until: r.lockedUntil },
+      });
+      const remaining = formatLockoutRemaining(r.lockedUntil - now);
+      await this.deps.reply(
+        msg.chatId,
+        `Too many failed attempts. Locked for ${remaining}.`,
+      );
+      return;
+    }
     if (failures >= TOTP_SETUP_MAX_FAILURES) {
       this.pending.delete(msg.userId);
       this.totpSetupFailures.delete(msg.userId);
@@ -261,18 +374,20 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
       return;
     }
+    if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'balance_reveal' });
     await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to view your balance.');
   }
 
   private async respondBalanceReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     this.pending.delete(msg.userId);
-    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    const v = this.verifyTotpGated(msg.userId, msg.text.trim(), 'balance_reveal');
     if (!v.ok) {
-      this.audit.write({
-        ts: this.deps.nowMs(), telegramId: msg.userId,
-        event: 'totp_verify_failed', details: { op: 'balance_reveal' },
-      });
+      if (v.locked) {
+        const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
+        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        return;
+      }
       await this.deps.reply(msg.chatId, '2FA code invalid. Try /balance again.');
       return;
     }
@@ -325,6 +440,7 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'Set a withdrawal destination first via /setwhitelist.');
       return;
     }
+    if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     const parts = msg.text.trim().split(/\s+/);
     const raw = parts[1];
     if (!raw) {
@@ -404,12 +520,13 @@ export class CommandHandlers {
     pending: Extract<PendingAction, { kind: 'withdraw' }>,
   ): Promise<void> {
     this.pending.delete(msg.userId);
-    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    const v = this.verifyTotpGated(msg.userId, msg.text.trim(), 'withdraw');
     if (!v.ok) {
-      this.audit.write({
-        ts: this.deps.nowMs(), telegramId: msg.userId,
-        event: 'totp_verify_failed', details: { op: 'withdraw' },
-      });
+      if (v.locked) {
+        const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
+        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        return;
+      }
       await this.deps.reply(msg.chatId, '2FA code invalid. Try /withdraw again.');
       return;
     }
@@ -463,6 +580,7 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'That does not look like a valid Solana address.');
       return;
     }
+    if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     if (user.whitelistAddress === null) {
       this.pending.set(msg.userId, { kind: 'setwhitelist_first', address: addr });
       await this.deps.reply(
@@ -487,6 +605,7 @@ export class CommandHandlers {
       await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
       return;
     }
+    if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'cancelwhitelist' });
     await this.deps.reply(msg.chatId, 'Reply with your 2FA code to cancel the pending whitelist change.');
   }
@@ -496,12 +615,13 @@ export class CommandHandlers {
     pending: Extract<PendingAction, { kind: 'setwhitelist_first' | 'setwhitelist_change' }>,
   ): Promise<void> {
     this.pending.delete(msg.userId);
-    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    const v = this.verifyTotpGated(msg.userId, msg.text.trim(), pending.kind);
     if (!v.ok) {
-      this.audit.write({
-        ts: this.deps.nowMs(), telegramId: msg.userId,
-        event: 'totp_verify_failed', details: { op: pending.kind },
-      });
+      if (v.locked) {
+        const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
+        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        return;
+      }
       await this.deps.reply(msg.chatId, '2FA code invalid. Try /setwhitelist again.');
       return;
     }
@@ -527,12 +647,13 @@ export class CommandHandlers {
     msg: { chatId: number; userId: number; text: string },
   ): Promise<void> {
     this.pending.delete(msg.userId);
-    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    const v = this.verifyTotpGated(msg.userId, msg.text.trim(), 'cancelwhitelist');
     if (!v.ok) {
-      this.audit.write({
-        ts: this.deps.nowMs(), telegramId: msg.userId,
-        event: 'totp_verify_failed', details: { op: 'cancelwhitelist' },
-      });
+      if (v.locked) {
+        const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
+        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        return;
+      }
       await this.deps.reply(msg.chatId, '2FA code invalid. Try /cancelwhitelist again.');
       return;
     }
@@ -551,12 +672,13 @@ export class CommandHandlers {
 
   private async respondDepositReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     this.pending.delete(msg.userId);
-    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    const v = this.verifyTotpGated(msg.userId, msg.text.trim(), 'deposit_reveal');
     if (!v.ok) {
-      this.audit.write({
-        ts: this.deps.nowMs(), telegramId: msg.userId,
-        event: 'totp_verify_failed', details: { op: 'deposit_reveal' },
-      });
+      if (v.locked) {
+        const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
+        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        return;
+      }
       await this.deps.reply(msg.chatId, '2FA code invalid. Try /deposit again.');
       return;
     }

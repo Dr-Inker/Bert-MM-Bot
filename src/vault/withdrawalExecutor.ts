@@ -40,6 +40,16 @@ export class WithdrawalExecutor {
       try {
         await this.processOne(w.id);
       } catch (e) {
+        // N1: If the row already has a tx_sig populated, the on-chain
+        // transfer landed but the downstream DB work failed. Marking the row
+        // `failed` would mislead /forceprocess into requeuing — double-pay.
+        // Leave the row in `processing` and let the operator reconcile via
+        // the `withdrawal_db_sync_failed` audit already written by processOne.
+        const current = this.deps.store.getWithdrawalById(w.id);
+        if (current?.txSig) {
+          // Already audited in processOne; just continue without marking failed.
+          continue;
+        }
         const reason = e instanceof Error ? `unexpected: ${e.message}` : 'unexpected_error';
         this.deps.store.failWithdrawal({ id: w.id, reason, processedAt: this.deps.now() });
         // Do not re-throw — continue processing remaining withdrawals.
@@ -109,12 +119,52 @@ export class WithdrawalExecutor {
       }
     }
 
+    // Execute the on-chain transfer. If this throws, no funds have moved and
+    // we can safely mark the row failed below (in the transfer-failure catch).
+    let transferSig: string;
     try {
       const r = await this.deps.executeTransfer({
         destination: row.destination,
         solLamports: needSol,
         bertRaw: needBert,
       });
+      transferSig = r.txSig;
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : 'unknown';
+      this.deps.store.failWithdrawal({ id, reason, processedAt: now });
+      this.deps.store.writeAudit({
+        ts: now,
+        telegramId: row.telegramId,
+        event: 'withdrawal_failed',
+        detailsJson: JSON.stringify({ id, reason }),
+      });
+      return;
+    }
+
+    // N1: pre-commit the on-chain tx signature BEFORE the completeWithdrawal
+    // transaction. If the subsequent DB work fails, the populated tx_sig is
+    // the authoritative signal that funds are already on-chain and the row
+    // must NOT be requeued via /forceprocess (it would double-pay).
+    try {
+      this.deps.store.markWithdrawalSent({ id, txSig: transferSig });
+    } catch (e) {
+      // Defence in depth: if we can't even record the tx_sig (race / db lock),
+      // emit a high-severity audit and leave the row as-is (processing). The
+      // operator will see it in /vaultstatus and can reconcile manually.
+      this.deps.store.writeAudit({
+        ts: now,
+        telegramId: row.telegramId,
+        event: 'withdrawal_db_sync_failed',
+        detailsJson: JSON.stringify({
+          id, txSig: transferSig,
+          error: e instanceof Error ? e.message : String(e),
+          stage: 'markWithdrawalSent',
+        }),
+      });
+      return;
+    }
+
+    try {
       // Snapshot totalShares BEFORE the burn so we can compute the
       // post-withdrawal pool value as (totalSharesBefore - netShares) * navPerShare.
       // Only netShares' worth of USD leaves the pool; feeShares stay in-pool
@@ -125,7 +175,7 @@ export class WithdrawalExecutor {
       this.deps.store.withTransaction(() => {
         this.deps.store.completeWithdrawal({
           id,
-          txSig: r.txSig,
+          txSig: transferSig,
           solLamportsOut: needSol,
           bertRawOut: needBert,
           navPerShareAt: navPerShare,
@@ -143,20 +193,29 @@ export class WithdrawalExecutor {
           telegramId: row.telegramId,
           event: 'withdrawal_completed',
           detailsJson: JSON.stringify({
-            id, txSig: r.txSig, sharesBurned: row.sharesBurned,
+            id, txSig: transferSig, sharesBurned: row.sharesBurned,
             feeShares: row.feeShares, usdOwed, navPerShare,
           }),
         });
       });
     } catch (e) {
-      const reason = e instanceof Error ? e.message : 'unknown';
-      this.deps.store.failWithdrawal({ id, reason, processedAt: now });
+      // N1: funds ARE on-chain (transferSig confirmed, tx_sig persisted), but
+      // the share-burn / NAV snapshot / audit transaction failed. Leave the
+      // row in 'processing' with tx_sig populated — operator must investigate
+      // and reconcile manually. Do NOT fail the row: that would invite a
+      // /forceprocess-driven double-pay.
+      const reason = e instanceof Error ? e.message : String(e);
       this.deps.store.writeAudit({
         ts: now,
         telegramId: row.telegramId,
-        event: 'withdrawal_failed',
-        detailsJson: JSON.stringify({ id, reason }),
+        event: 'withdrawal_db_sync_failed',
+        detailsJson: JSON.stringify({
+          id, txSig: transferSig, error: reason, stage: 'completeWithdrawal',
+        }),
       });
+      // Re-throw so the outer drain() catch logs at error level and the
+      // operator sees it; the row is already safe (tx_sig blocks requeue).
+      throw new Error(`withdrawal #${id} db sync failed after transfer: ${reason}`);
     }
   }
 }

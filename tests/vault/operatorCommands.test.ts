@@ -235,4 +235,27 @@ describe('OperatorCommandHandlers — /forceprocess', () => {
     // Still queued, unchanged
     expect(h.store.getWithdrawalById(id)!.status).toBe('queued');
   });
+
+  // ── N1: tx_sig pre-commit guard ───────────────────────────────────────
+  it('N1: refuses to requeue if tx_sig is populated (funds on-chain)', async () => {
+    seedUser(h.store, 1);
+    const id = h.store.enqueueWithdrawal({
+      telegramId: 1, destination: 'Dest1',
+      sharesBurned: 5, feeShares: 0.015, queuedAt: h.nowRef.current - 1000,
+    });
+    // Simulate the N1 scenario: transfer landed, DB sync failed, row was
+    // (somehow) moved to 'failed' but tx_sig is populated.
+    h.store.markWithdrawalSent({ id, txSig: 'outsig' });
+    h.store.failWithdrawal({ id, reason: 'sim', processedAt: h.nowRef.current - 500 });
+
+    await h.handlers.handleForceProcess({
+      chatId: 99, userId: 99, text: `/forceprocess ${id}`,
+    });
+
+    // Reply warns about the tx_sig; status stays 'failed' (NOT flipped to queued).
+    expect(h.reply).toHaveBeenCalledTimes(1);
+    const [, text] = h.reply.mock.calls[0];
+    expect(text).toMatch(/tx_sig|on-chain|reconcile/i);
+    expect(h.store.getWithdrawalById(id)!.status).toBe('failed');
+  });
 });

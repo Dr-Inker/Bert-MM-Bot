@@ -155,6 +155,27 @@ export class DepositorStore {
       .run(id);
   }
 
+  /**
+   * Record the on-chain tx signature for a withdrawal immediately after the
+   * transfer confirms, before completing the share-burn. If the subsequent
+   * DB completion fails, the populated tx_sig signals that funds are already
+   * on-chain — requeuing via /forceprocess is UNSAFE.
+   *
+   * The `tx_sig IS NULL` guard protects against a double-send race: a second
+   * caller with a different txSig will get `changes=0` and can abort rather
+   * than overwriting a previously-recorded signature.
+   */
+  markWithdrawalSent(args: { id: number; txSig: string }): void {
+    const row = this.db.prepare(
+      `UPDATE vault_withdrawals SET tx_sig=? WHERE id=? AND tx_sig IS NULL`,
+    ).run(args.txSig, args.id) as { changes: number };
+    if (row.changes !== 1) {
+      throw new Error(
+        `markWithdrawalSent: no row updated (id=${args.id}, tx_sig may already be populated)`,
+      );
+    }
+  }
+
   completeWithdrawal(args: {
     id: number; txSig: string;
     solLamportsOut: bigint; bertRawOut: bigint;
@@ -192,15 +213,20 @@ export class DepositorStore {
 
   /**
    * Reset a failed withdrawal back to 'queued' so the next drain retries it.
-   * Clears failure_reason and processed_at. Throws if the id is missing or the
-   * withdrawal is not currently in 'failed' status.
+   * Clears failure_reason and processed_at. Throws if the id is missing, the
+   * withdrawal is not currently in 'failed' status, or the row has a
+   * non-null tx_sig (funds may already be on-chain — retry would double-pay).
    */
   requeueFailedWithdrawal(id: number): void {
-    const row = this.db.prepare(`SELECT status FROM vault_withdrawals WHERE id=?`)
-      .get(id) as { status: string } | undefined;
+    const row = this.getWithdrawalById(id);
     if (!row) throw new Error(`requeueFailedWithdrawal: id ${id} not found`);
     if (row.status !== 'failed') {
       throw new Error(`requeueFailedWithdrawal: id ${id} is in status '${row.status}', not 'failed'`);
+    }
+    if (row.txSig) {
+      throw new Error(
+        `requeueFailedWithdrawal: id ${id} has tx_sig populated — funds may already be on-chain. Refusing to requeue.`,
+      );
     }
     this.db.prepare(`
       UPDATE vault_withdrawals

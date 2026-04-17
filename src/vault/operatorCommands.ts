@@ -115,6 +115,16 @@ export class OperatorCommandHandlers {
       await this.deps.reply(msg.chatId, `Withdrawal #${id} not found.`);
       return;
     }
+    // N1: refuse requeue if the row already has a tx_sig. That means the
+    // on-chain transfer has landed — retrying would double-pay the user.
+    if (w.txSig) {
+      await this.deps.reply(
+        msg.chatId,
+        `Withdrawal #${id} has an on-chain tx_sig (${w.txSig}). Do NOT requeue. ` +
+          `Reconcile manually via /reconcilewithdrawal ${id}.`,
+      );
+      return;
+    }
     if (w.status !== 'failed') {
       await this.deps.reply(
         msg.chatId,

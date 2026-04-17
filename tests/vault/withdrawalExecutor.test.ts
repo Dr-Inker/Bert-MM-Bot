@@ -195,4 +195,85 @@ describe('WithdrawalExecutor', () => {
     const failed = store.listWithdrawalsByStatus('failed');
     expect(failed[0].failureReason).toBe('oracle_unavailable');
   });
+
+  // ── N1: tx_sig pre-commit / double-pay prevention ───────────────────────
+
+  it('N1: DB sync failure after transfer leaves row in processing with tx_sig populated', async () => {
+    const id = store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 100, feeShares: 0.3, queuedAt: 150,
+    });
+
+    // Mock completeWithdrawal to throw AFTER tx_sig has been pre-committed.
+    const origComplete = store.completeWithdrawal.bind(store);
+    store.completeWithdrawal = () => {
+      throw new Error('simulated db lock');
+    };
+
+    const exec = new WithdrawalExecutor({
+      store,
+      getMid: async () => ({ solUsd: 100, bertUsd: 0.01 }),
+      getWalletBalances: async () => ({ solLamports: 10_000_000_000n, bertRaw: 0n }),
+      getPositionSnapshot: async () => ({ totalValueUsd: 0, solUsdInPosition: 0, bertUsdInPosition: 0 }),
+      reserveSolLamports: 200_000_000n,
+      partialClose: async () => {},
+      executeTransfer: async () => ({ txSig: 'outsig' }),
+      now: () => 200,
+    });
+
+    await exec.drain();
+
+    // Restore so afterEach / other tests aren't poisoned.
+    store.completeWithdrawal = origComplete;
+
+    const w = store.getWithdrawalById(id)!;
+    expect(w.status).toBe('processing');
+    expect(w.txSig).toBe('outsig');
+    expect(w.failureReason).toBeNull();
+
+    const events = store.listRecentAuditEvents(10).map((e) => e.event);
+    expect(events).not.toContain('withdrawal_failed');
+    expect(events).toContain('withdrawal_db_sync_failed');
+    // Shares are still burned? No — completeWithdrawal was the operation that
+    // would burn them, and it threw. So shares should be intact.
+    expect(store.getShares(1)).toBe(1000);
+  });
+
+  it('N1: second drain pass does not resubmit a row whose tx_sig is populated', async () => {
+    const id = store.enqueueWithdrawal({
+      telegramId: 1, destination: 'DEST',
+      sharesBurned: 100, feeShares: 0.3, queuedAt: 150,
+    });
+
+    // Fail the DB sync on the first pass.
+    const origComplete = store.completeWithdrawal.bind(store);
+    store.completeWithdrawal = () => { throw new Error('sim db lock'); };
+
+    let transferCalls = 0;
+    const exec = new WithdrawalExecutor({
+      store,
+      getMid: async () => ({ solUsd: 100, bertUsd: 0.01 }),
+      getWalletBalances: async () => ({ solLamports: 10_000_000_000n, bertRaw: 0n }),
+      getPositionSnapshot: async () => ({ totalValueUsd: 0, solUsdInPosition: 0, bertUsdInPosition: 0 }),
+      reserveSolLamports: 200_000_000n,
+      partialClose: async () => {},
+      executeTransfer: async () => {
+        transferCalls++;
+        return { txSig: 'outsig' };
+      },
+      now: () => 200,
+    });
+    await exec.drain();
+
+    expect(transferCalls).toBe(1);
+    expect(store.getWithdrawalById(id)!.txSig).toBe('outsig');
+
+    // Restore — but the row is already in 'processing', and drain only picks
+    // up 'queued' rows. Call drain() again; the same row should NOT be
+    // processed again (it's not queued), and no extra transfer.
+    store.completeWithdrawal = origComplete;
+
+    await exec.drain();
+    expect(transferCalls).toBe(1);
+  });
 });

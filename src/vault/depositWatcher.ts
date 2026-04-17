@@ -1,3 +1,4 @@
+import { PublicKey } from '@solana/web3.js';
 import type { Connection, ConfirmedSignatureInfo, ParsedTransactionWithMeta } from '@solana/web3.js';
 
 export interface InflowEvent {
@@ -11,7 +12,6 @@ export interface InflowEvent {
 export interface DepositWatcherDeps {
   connection: Connection;
   bertMint: string;
-  minConfirmations: number;
   isAlreadyCredited: (sig: string) => boolean;
   onInflow: (event: InflowEvent) => Promise<void>;
 }
@@ -22,7 +22,7 @@ export class DepositWatcher {
   /** Poll one deposit address for new inflows. Calls onInflow() for each. */
   async pollAddress(address: string): Promise<void> {
     const sigs: ConfirmedSignatureInfo[] = await this.deps.connection.getSignaturesForAddress(
-      { toBase58: () => address } as any, { limit: 10 }
+      new PublicKey(address), { limit: 10 }
     );
     for (const s of sigs) {
       if (s.err !== null) continue;

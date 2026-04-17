@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DepositWatcher, type InflowEvent } from '../../src/vault/depositWatcher.js';
 
+const TEST_ADDR = '11111111111111111111111111111111';
+
 describe('DepositWatcher', () => {
   const mockConnection = (solDelta: number, bertDelta: number, sig: string) => ({
     getSignaturesForAddress: vi.fn().mockResolvedValue([{
@@ -10,10 +12,10 @@ describe('DepositWatcher', () => {
       meta: {
         preBalances: [0, 0],
         postBalances: [solDelta, 0],
-        preTokenBalances: [{ owner: 'addr', mint: 'bertmint', uiTokenAmount: { amount: '0', decimals: 6 } }],
-        postTokenBalances: [{ owner: 'addr', mint: 'bertmint', uiTokenAmount: { amount: String(bertDelta), decimals: 6 } }],
+        preTokenBalances: [{ owner: TEST_ADDR, mint: 'bertmint', uiTokenAmount: { amount: '0', decimals: 6 } }],
+        postTokenBalances: [{ owner: TEST_ADDR, mint: 'bertmint', uiTokenAmount: { amount: String(bertDelta), decimals: 6 } }],
       },
-      transaction: { message: { accountKeys: [{ pubkey: 'addr', signer: false, writable: true }] } },
+      transaction: { message: { accountKeys: [{ pubkey: TEST_ADDR, signer: false, writable: true }] } },
     }),
     getSlot: vi.fn().mockResolvedValue(2),
   });
@@ -24,14 +26,13 @@ describe('DepositWatcher', () => {
     const watcher = new DepositWatcher({
       connection: conn as any,
       bertMint: 'bertmint',
-      minConfirmations: 0,
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });
-    await watcher.pollAddress('addr');
+    await watcher.pollAddress(TEST_ADDR);
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
-      depositAddress: 'addr',
+      depositAddress: TEST_ADDR,
       inboundTxSig: 'sig1',
       solLamports: 1_500_000_000n,
       bertRaw: 0n,
@@ -44,11 +45,10 @@ describe('DepositWatcher', () => {
     const watcher = new DepositWatcher({
       connection: conn as any,
       bertMint: 'bertmint',
-      minConfirmations: 0,
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });
-    await watcher.pollAddress('addr');
+    await watcher.pollAddress(TEST_ADDR);
     expect(events[0].bertRaw).toBe(250_000_000n);
     expect(events[0].solLamports).toBe(0n);
   });
@@ -59,11 +59,10 @@ describe('DepositWatcher', () => {
     const watcher = new DepositWatcher({
       connection: conn as any,
       bertMint: 'bertmint',
-      minConfirmations: 0,
       isAlreadyCredited: (sig) => sig === 'sigC',
       onInflow: async (e) => { events.push(e); },
     });
-    await watcher.pollAddress('addr');
+    await watcher.pollAddress(TEST_ADDR);
     expect(events.length).toBe(0);
   });
 
@@ -73,11 +72,10 @@ describe('DepositWatcher', () => {
     const watcher = new DepositWatcher({
       connection: conn as any,
       bertMint: 'bertmint',
-      minConfirmations: 0,
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });
-    await watcher.pollAddress('addr');
+    await watcher.pollAddress(TEST_ADDR);
     expect(events.length).toBe(0);
   });
 });

@@ -1,10 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { Keypair } from '@solana/web3.js';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { loadConfigFromFile } from './config.js';
 import { logger } from './logger.js';
 import { StateStore } from './stateStore.js';
 import { Notifier } from './notifier.js';
 import { TelegramCommander } from './telegramCommander.js';
+import { DepositorStore } from './vault/depositorStore.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -89,13 +91,80 @@ async function main(): Promise<void> {
   const priceHistory: MidPrice[] = [];
   // Start Telegram command listener (if configured)
   if (cfg.notifier?.telegram) {
-    const tgCmd = new TelegramCommander(
-      cfg.notifier.telegram.botToken,
-      cfg.notifier.telegram.chatIdInfo,
-      CONFIG_PATH,
-      state,
-    );
-    tgCmd.start();
+    const depositorStore = new DepositorStore(state);
+    const operatorChatId = Number(cfg.notifier.telegram.chatIdInfo);
+    if (!Number.isFinite(operatorChatId)) {
+      logger.warn({ chatIdInfo: cfg.notifier.telegram.chatIdInfo }, 'telegram operator chat id is not numeric; telegram commander disabled');
+    } else {
+      const tgCmd = new TelegramCommander({
+        botToken: cfg.notifier.telegram.botToken,
+        operatorChatId,
+        depositorStore,
+      });
+
+      const setEnabled = (enabled: boolean): void => {
+        try {
+          const raw = readFileSync(CONFIG_PATH, 'utf8');
+          const doc = parseYaml(raw) as Record<string, unknown>;
+          doc['enabled'] = enabled;
+          writeFileSync(CONFIG_PATH, stringifyYaml(doc));
+          const action = enabled ? 'resume' : 'pause';
+          state.recordOperatorAction({ ts: Date.now(), command: `telegram:${action}`, osUser: 'telegram' });
+        } catch (e) {
+          logger.error({ err: e }, 'telegram commander: failed to update config');
+        }
+      };
+
+      const isEnabled = (): boolean => {
+        try {
+          const raw = readFileSync(CONFIG_PATH, 'utf8');
+          const doc = parseYaml(raw) as Record<string, unknown>;
+          return doc['enabled'] !== false;
+        } catch {
+          return true;
+        }
+      };
+
+      tgCmd.registerOperatorCommand('pause', async (msg) => {
+        setEnabled(false);
+        await tgCmd.reply(msg.chatId, '⏸ Bot PAUSED. Position stays open but no rebalances will occur. Send /resume to re-enable.');
+        logger.info('bot paused via telegram command');
+      });
+
+      tgCmd.registerOperatorCommand('resume', async (msg) => {
+        setEnabled(true);
+        state.setDegraded(false, 'cleared via telegram /resume');
+        await tgCmd.reply(msg.chatId, '▶️ Bot RESUMED. Degraded flag also cleared.');
+        logger.info('bot resumed via telegram command');
+      });
+
+      tgCmd.registerOperatorCommand('status', async (msg) => {
+        const pos = state.getCurrentPosition();
+        const degraded = state.isDegraded();
+        const enabled = isEnabled();
+        const rebalancesToday = state.getRebalancesToday(Date.now());
+        const lines = [
+          enabled ? '🟢 Enabled' : '🔴 Paused',
+          degraded ? '🟡 DEGRADED' : '✅ Healthy',
+          `Position: ${pos ? pos.nftMint.slice(0, 8) + '...' : 'none'}`,
+          pos ? `Range: $${pos.lowerUsd.toFixed(6)} – $${pos.upperUsd.toFixed(6)}` : '',
+          `Rebalances today: ${rebalancesToday}`,
+        ].filter(Boolean);
+        await tgCmd.reply(msg.chatId, lines.join('\n'));
+      });
+
+      tgCmd.registerOperatorCommand('help', async (msg) => {
+        await tgCmd.reply(msg.chatId, [
+          'Commands:',
+          '/pause — stop rebalancing (position stays open)',
+          '/resume — re-enable bot + clear degraded flag',
+          '/status — show current state',
+          '/help — this message',
+        ].join('\n'));
+      });
+
+      tgCmd.start();
+    }
   }
 
   let lastHourlyReport = new Date().getUTCHours(); // skip immediate report on startup

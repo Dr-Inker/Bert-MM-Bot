@@ -1,37 +1,126 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { logger } from './logger.js';
-import type { StateStore } from './stateStore.js';
+import type { DepositorStore } from './vault/depositorStore.js';
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_TIMEOUT_S = 30;
 
 /**
- * Listens for Telegram bot commands via long-polling (getUpdates).
- * Supported commands: /pause, /resume, /status
+ * Incoming Telegram message (post-parsing) handed to command handlers.
+ */
+export interface IncomingMessage {
+  chatId: number;
+  userId: number;
+  text: string;
+  messageId: number;
+}
+
+export type CommandHandler = (msg: IncomingMessage) => Promise<void>;
+
+type Kind = 'operator' | 'vault' | 'public' | 'enrollment';
+
+export interface TelegramCommanderDeps {
+  botToken: string;
+  operatorChatId: number;
+  depositorStore: DepositorStore;
+}
+
+/**
+ * Listens for Telegram bot commands via long-polling (getUpdates) and
+ * dispatches to handlers registered on a command registry.
  *
- * Only responds to messages from the authorized chat ID.
+ * Authorization kinds:
+ *  - operator:   requires chatId === operatorChatId
+ *  - vault:      requires depositorStore.getUser(userId) exists
+ *  - public:     anyone
+ *  - enrollment: anyone (e.g. /account, the enrollment entry point)
  */
 export class TelegramCommander {
   private offset = 0;
   private running = false;
+  private readonly botToken: string;
+  private readonly operatorChatId: number;
+  private readonly depositorStore: DepositorStore;
+  private handlers = new Map<string, { kind: Kind; fn: CommandHandler }>();
 
-  constructor(
-    private readonly botToken: string,
-    private readonly authorizedChatId: string,
-    private readonly configPath: string,
-    private readonly state: StateStore,
-  ) {}
+  constructor(deps: TelegramCommanderDeps) {
+    this.botToken = deps.botToken;
+    this.operatorChatId = deps.operatorChatId;
+    this.depositorStore = deps.depositorStore;
+  }
+
+  registerOperatorCommand(name: string, fn: CommandHandler): void {
+    this.handlers.set(name.toLowerCase(), { kind: 'operator', fn });
+  }
+
+  registerVaultCommand(name: string, fn: CommandHandler): void {
+    this.handlers.set(name.toLowerCase(), { kind: 'vault', fn });
+  }
+
+  registerPublicCommand(name: string, fn: CommandHandler): void {
+    this.handlers.set(name.toLowerCase(), { kind: 'public', fn });
+  }
+
+  registerEnrollmentCommand(name: string, fn: CommandHandler): void {
+    this.handlers.set(name.toLowerCase(), { kind: 'enrollment', fn });
+  }
+
+  /**
+   * Authorize and dispatch a parsed command. Returns silently when the text
+   * is not a recognized command or the caller is not authorized.
+   */
+  async dispatch(msg: IncomingMessage): Promise<void> {
+    const match = msg.text.match(/^\/([a-z_]+)(?:\s|$)/i);
+    if (!match || !match[1]) return;
+    const name = match[1].toLowerCase();
+    const h = this.handlers.get(name);
+    if (!h) return;
+
+    switch (h.kind) {
+      case 'public':
+      case 'enrollment':
+        await h.fn(msg);
+        return;
+      case 'operator':
+        if (msg.chatId === this.operatorChatId) {
+          await h.fn(msg);
+        } else {
+          logger.warn({ chatId: msg.chatId, cmd: name }, 'telegram operator command from unauthorized chat');
+        }
+        return;
+      case 'vault': {
+        const user = this.depositorStore.getUser(msg.userId);
+        if (user) {
+          await h.fn(msg);
+        } else {
+          logger.warn({ userId: msg.userId, cmd: name }, 'telegram vault command from non-registered user');
+        }
+        return;
+      }
+    }
+  }
 
   start(): void {
     if (this.running) return;
     this.running = true;
-    logger.info('telegram commander started — listening for /pause, /resume, /status');
+    logger.info({ registered: Array.from(this.handlers.keys()) }, 'telegram commander started');
     this.pollLoop();
   }
 
   stop(): void {
     this.running = false;
+  }
+
+  /** Send a reply to the given chat. Public so handlers registered from main.ts can use it. */
+  async reply(chatId: number, text: string): Promise<void> {
+    try {
+      await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text }),
+      });
+    } catch (e) {
+      logger.warn({ err: e }, 'telegram commander reply failed');
+    }
   }
 
   private async pollLoop(): Promise<void> {
@@ -49,7 +138,12 @@ export class TelegramCommander {
           ok: boolean;
           result: Array<{
             update_id: number;
-            message?: { chat: { id: number }; text?: string };
+            message?: {
+              message_id: number;
+              chat: { id: number };
+              from?: { id: number };
+              text?: string;
+            };
           }>;
         };
 
@@ -63,101 +157,20 @@ export class TelegramCommander {
           const msg = update.message;
           if (!msg?.text) continue;
 
-          // Only respond to authorized chat
-          if (String(msg.chat.id) !== this.authorizedChatId) {
-            logger.warn({ chatId: msg.chat.id }, 'telegram command from unauthorized chat');
-            continue;
-          }
-
-          const cmd = msg.text.trim().toLowerCase().split(/\s/)[0] ?? '';
-          if (cmd) await this.handleCommand(cmd, msg.chat.id);
+          // Prefer from.id (user) for vault-kind auth; fall back to chat.id for
+          // private chats where they're equal anyway.
+          const userId = msg.from?.id ?? msg.chat.id;
+          await this.dispatch({
+            chatId: msg.chat.id,
+            userId,
+            text: msg.text.trim(),
+            messageId: msg.message_id,
+          });
         }
       } catch (e) {
         logger.warn({ err: e }, 'telegram commander poll error');
         await sleep(POLL_INTERVAL_MS);
       }
-    }
-  }
-
-  private async handleCommand(cmd: string, chatId: number): Promise<void> {
-    switch (cmd) {
-      case '/pause':
-        this.setEnabled(false);
-        await this.reply(chatId, '⏸ Bot PAUSED. Position stays open but no rebalances will occur. Send /resume to re-enable.');
-        logger.info('bot paused via telegram command');
-        break;
-
-      case '/resume':
-        this.setEnabled(true);
-        this.state.setDegraded(false, 'cleared via telegram /resume');
-        await this.reply(chatId, '▶️ Bot RESUMED. Degraded flag also cleared.');
-        logger.info('bot resumed via telegram command');
-        break;
-
-      case '/status': {
-        const pos = this.state.getCurrentPosition();
-        const degraded = this.state.isDegraded();
-        const enabled = this.isEnabled();
-        const rebalancesToday = this.state.getRebalancesToday(Date.now());
-        const lines = [
-          enabled ? '🟢 Enabled' : '🔴 Paused',
-          degraded ? '🟡 DEGRADED' : '✅ Healthy',
-          `Position: ${pos ? pos.nftMint.slice(0, 8) + '...' : 'none'}`,
-          pos ? `Range: $${pos.lowerUsd.toFixed(6)} – $${pos.upperUsd.toFixed(6)}` : '',
-          `Rebalances today: ${rebalancesToday}`,
-        ].filter(Boolean);
-        await this.reply(chatId, lines.join('\n'));
-        break;
-      }
-
-      case '/help':
-        await this.reply(chatId, [
-          'Commands:',
-          '/pause — stop rebalancing (position stays open)',
-          '/resume — re-enable bot + clear degraded flag',
-          '/status — show current state',
-          '/help — this message',
-        ].join('\n'));
-        break;
-
-      default:
-        // Ignore non-command messages
-        break;
-    }
-  }
-
-  private setEnabled(enabled: boolean): void {
-    try {
-      const raw = readFileSync(this.configPath, 'utf8');
-      const doc = parseYaml(raw) as Record<string, unknown>;
-      doc['enabled'] = enabled;
-      writeFileSync(this.configPath, stringifyYaml(doc));
-      const action = enabled ? 'resume' : 'pause';
-      this.state.recordOperatorAction({ ts: Date.now(), command: `telegram:${action}`, osUser: 'telegram' });
-    } catch (e) {
-      logger.error({ err: e }, 'telegram commander: failed to update config');
-    }
-  }
-
-  private isEnabled(): boolean {
-    try {
-      const raw = readFileSync(this.configPath, 'utf8');
-      const doc = parseYaml(raw) as Record<string, unknown>;
-      return doc['enabled'] !== false;
-    } catch {
-      return true;
-    }
-  }
-
-  private async reply(chatId: number, text: string): Promise<void> {
-    try {
-      await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
-      });
-    } catch (e) {
-      logger.warn({ err: e }, 'telegram commander reply failed');
     }
   }
 }

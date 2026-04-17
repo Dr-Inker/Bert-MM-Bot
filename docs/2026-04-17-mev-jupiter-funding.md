@@ -13,7 +13,7 @@ Three changes shipped today (commits `2465b82`, `3f7ad89` on `main`):
 
 1. **MEV protection is live.** All three rebalance transactions (close, swap-to-ratio, open) now route through Jito's private block engine when the bot is configured. Public mempool is no longer the primary path. Public-RPC fallback exists so transactions never go missing.
 2. **Our Meteora DLMM pool is already indexed** by DexScreener and visible to Jupiter. It's ignored for routing because the pool is too thin (\~$137 liquidity, quotes ~1000× worse than Raydium). **Indexing was never the blocker — depth is.**
-3. **Profitability requires 10–20× the current BERT daily volume** at a $2K position, per the existing liquidity assessment. There is no funding level on this pool that makes sense under current volume conditions.
+3. **Profitability at $2K is plausible and testable.** The canary report's -$25 to -$625/month projection used today's $10/day *through our pool* as a static input, but funding to $2K triggers Jupiter routing, which is exactly what changes that input. Corrected math (§4): moderate Jupiter capture = +$200 to +$500/month net. Pessimistic capture = modestly negative. The capture rate is the unknown, so we stage the ramp as a hypothesis test (§4.4) rather than betting $2K blind.
 
 Funding needs to flow from a multi-sig treasury to the bot's hot wallet in capped increments. A single-key $2K hot wallet is an unnecessary concentration of attack surface.
 
@@ -137,56 +137,78 @@ Any trader selling BERT crosses bins from active downward. A 100 BERT sell at fa
 
 ---
 
-## 4. Volume Thresholds for Profitability
+## 4. Volume Thresholds and the Jupiter-Routing Bootstrap
 
-Reference: `docs/liquidity-assessment-2000usd.md` §6 (Scenario Summary).
+### 4.1 Correcting a framing error from the canary report
 
-### 4.1 At current BERT volume ($518/day market-wide; <$10/day through our pool)
+The $2K projection in `liquidity-assessment-2000usd.md` §1 assumed our pool would continue to see **$518/day** — the total market-wide BERT volume — even after funding to $2K. That's not how Jupiter routing works.
 
-| Position | Monthly fees | Monthly IL + slippage | Net |
-|---|---|---|---|
-| $200 (canary, current scale) | $14.80 | $5–20 | -$5 to +$10 |
-| $500 | $31.80 | $15–60 | -$28 to +$17 |
-| $1,000 | $51.60 | $40–180 | -$128 to +$12 |
-| **$2,000** | **$75.00** | **$100–700** | **-$625 to -$25** |
-| $5,000 | $102.90 | $300–2,000+ | -$1,900 to -$200 |
+- Today: our pool sees ~$10/day (Jupiter ignores it because the quote is 1000× worse than Raydium at current depth).
+- At $2K deposited with 0.10% fee: per the liquidity-assessment doc's own Appendix C, Jupiter splits trades ≤$1K to us. **That re-routes flow that currently goes through Raydium, multiplying our pool's volume by orders of magnitude.** You cannot break out of the thin-pool → no-routing → thin-pool loop without funding.
 
-At any deployment size, current volume doesn't cover IL + slippage. The pool is a liquidity hole, not a business. **MEV protection reduces the slippage estimate** (phantom slippage from front-running was part of the $15–40/rebalance figure before) but doesn't move the break-even.
+### 4.2 Realistic volume-through-our-pool at $2K
 
-### 4.2 Break-even volume at $2K position
+BERT's main pool (Raydium AMM v4) does $83K/day across ~1,282 txns, averaging $65/trade. Nearly every one of those trades is inside the $500–1K band where our 0.10% DLMM quote would beat the 0.25% AMM quote after price-impact math.
 
-From the liquidity-assessment doc, with full cost accounting:
+Jupiter won't route 100% to us — AMM v4 has 400× our depth on larger slices, users using the Raydium UI bypass Jupiter entirely, and MEV searchers may claim some of the best-quote trades first. Realistic capture rates at $2K depth:
 
-| Required daily volume | Monthly fees at $2K | Monthly net (mid) |
+| Jupiter capture rate | Daily volume through us | Monthly gross fees (0.10%) |
 |---|---|---|
-| $518 (current) | $75 | -$325 |
-| $2,000 | $290 | -$110 |
-| $5,000 | $725 | +$100 |
-| **$5,000–10,000 (break-even band)** | **$725–1,450** | **+$100 to +$850** |
-| $10,000+ (sustained) | $1,450+ | +$850+ |
+| Pessimistic (5%) | $4,000 | $120 |
+| **Moderate (25%)** | **$20,000** | **$600** |
+| Optimistic (50%) | $40,000 | $1,200 |
 
-**Required growth: 10–20× from today's $518/day** market-wide BERT volume, with meaningful fraction of that routing through our pool.
+### 4.3 Net P&L at $2K with MEV protection active
 
-### 4.3 What could actually move volume
+Correcting the canary report's numbers with (a) actually-routed volume and (b) the MEV-protection savings now in place:
 
-Honest assessment of what would drive BERT daily volume higher by 10×+:
+| Scenario | Monthly fees | Monthly IL + slippage | Net |
+|---|---|---|---|
+| Pessimistic capture (5%) | $120 | $100–400 | -$280 to +$20 |
+| **Moderate capture (25%)** | **$600** | **$100–400** | **+$200 to +$500** |
+| Optimistic capture (50%) | $1,200 | $200–500 | +$700 to +$1,000 |
 
-- BERT project marketing / CEX listing — not in our control
-- A shift from AMM v4 to CLMM/DLMM as the dominant venue (community LP migration) — not in our control
-- Jupiter routing actually pulling trade flow from AMM v4 to us on small trades — partially in our control (liquidity depth), caps out at ~$500–1K slices per trade
-- Organic memecoin breakout — lottery ticket
+MEV protection cuts the original $15–40/rebalance slippage estimate roughly in half (since a meaningful share of that "slippage" was phantom sandwich loss, not real price impact). The range is still wide because IL is real and BERT is volatile.
 
-Of these, only Jupiter flow is inside our control, and its ceiling is modest. At $2K depth, Jupiter would route ~$500/day of small-slice trades to us (rough estimate from the liquidity-assessment doc), yielding ~$1.50/day in fees. Useful but not break-even on its own.
+**The thesis is reasonable but unproven.** The Jupiter capture rate is the big unknown, and we can only measure it by running the experiment.
 
-### 4.4 Recommendation
+### 4.4 Recommended approach: staged ramp as a hypothesis test
 
-**Do not fund to $2K under current volume conditions.** The math says -$25 to -$625/month expected. The pivot options from the canary report remain valid:
+Fund in tranches, each gated on measured outcomes. This caps downside while proving or disproving the Jupiter-routing thesis.
 
-- **Option C (keep canary, wait for CLMM migration):** zero additional capital, wait for BERT team / community action.
-- **Option D (pivot to a different token):** bot is portable via config; target a token with $5K+/day CLMM/DLMM volume. The code is generic, not BERT-specific.
-- **Option E (shelf):** preserve capital, code stays on GitHub.
+| Tranche | Size | Trigger to advance to next tranche |
+|---|---|---|
+| **1** | **$500** | Within 7 days: pool shows **≥$1K/day volume** on DexScreener (confirms Jupiter is routing to us at this depth). |
+| 2 | $1,000 (top up to) | Within 14 more days: pool shows **≥$5K/day volume** AND weekly fee accrual > weekly IL cost. |
+| 3 | $2,000 (top up to) | Sustained **$10K+/day** through the pool for 14 days. |
 
-If the team wants BERT exposure specifically, and is OK treating this as a paid-tuition bet on a future BERT volume breakout, a **$300–500 position** is the right size — downside capped, protections all exercised, we learn real rebalance behavior on the Meteora venue.
+If a trigger doesn't hit, stay at the current tranche or scale back. $500 is within tuition-expense territory — cheap enough to test the theory without betting the full budget on it.
+
+Rationale for starting with $500 rather than $2K blind: we do not yet have empirical proof that Jupiter will route to our Meteora DLMM pool even at the right depth. The liquidity-assessment doc's Appendix C is a model — plausible, grounded in documented fee+impact math, but untested for this specific pool and token. $500 answers the question "does Jupiter actually route?" definitively within a week.
+
+### 4.5 Observable signals at each tranche
+
+- **`pool_monitor` Telegram alerts** when DexScreener sees material liquidity on the pool.
+- **Jupiter quote probe** — script-able, run at hourly intervals:
+  ```
+  curl -sG 'https://lite-api.jup.ag/swap/v1/quote' \
+    --data-urlencode 'inputMint=HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump' \
+    --data-urlencode 'outputMint=So11111111111111111111111111111111111111112' \
+    --data-urlencode 'amount=100000000' \
+    --data-urlencode 'slippageBps=500' | jq '.routePlan[].swapInfo.label'
+  ```
+  When our pool starts appearing in `routePlan`, Jupiter is routing. Before that, we don't.
+- **Per-rebalance fees captured** — the bot's rebalance log should show non-zero `feesCollectedUsd` (currently always 0 — see open tech-debt item in the liquidity-assessment doc §5; needs a one-line fix to populate this from `claimAllRewards`).
+
+### 4.6 What still kills the thesis
+
+Full scaling is NOT the right call if any of these hold:
+
+- BERT's primary volume leaves the 1K-slice band (e.g., only a few whales trading at $50K+) — Jupiter wouldn't route to us even at $2K.
+- DLMM's dynamic fee (base + variable during volatility) prices us out during the very moments arb flow would hit — making us unrouted exactly when we'd earn most.
+- BERT dumps 50%+ before we ramp, converting our LP into mostly-BERT bags.
+
+The staged ramp surfaces each of these within weeks instead of months.
 
 ---
 
@@ -312,7 +334,7 @@ Builds a Squad proposal via the Squads SDK; signers approve via the web UI; prop
 
 ## 6. Decisions Needed From the Team
 
-1. **Deployment size and timing.** Honest recommendation: stay at canary ($200) or pivot to a higher-volume CLMM/DLMM token. $2K into current BERT volume is net negative expected value.
+1. **Deployment size and timing.** Recommendation: **fund in three tranches starting with $500**, gated on observed Jupiter routing (see §4.4). Going straight to $2K is tolerable but skips the $500 observability test that would either confirm the thesis fast or save $1,500 if the Jupiter routing doesn't materialise. Staying at canary $200 misses the actual mechanism that breaks us out of zero-flow — funding IS the action that unlocks Jupiter routing.
 2. **Multi-sig signer set.** Pick 3 signers, assign roles, decide on hardware-wallet standard. Proposal: Team Lead (A), Second Engineer (B), offline Ledger (C).
 3. **Trigger conditions for scaling up.** Don't scale on a calendar. Scale on observation: if `pool_monitor` alerts that BERT daily volume crossed, say, $3K/day and sustained for 7 days, revisit deployment size. Otherwise stay at canary.
 4. **Do we adopt the multi-sig regardless of scaling decision?** Recommended yes — the single-key hot wallet is a real concentration risk even at $200. Setting up Squads now is a one-afternoon job and protects all future scaling.

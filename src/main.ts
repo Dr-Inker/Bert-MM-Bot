@@ -10,6 +10,8 @@ import { DepositorStore } from './vault/depositorStore.js';
 import { Enrollment } from './vault/enrollment.js';
 import { Cooldowns } from './vault/cooldowns.js';
 import { CommandHandlers } from './vault/commands.js';
+import { OperatorCommandHandlers } from './vault/operatorCommands.js';
+import { AuditLog } from './vault/audit.js';
 import { loadMasterKey } from './vault/encryption.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
@@ -224,6 +226,19 @@ async function main(): Promise<void> {
           tgCmd.registerPublicCommand('stats', (msg) => handlers.handleStats(msg));
           // Non-command text messages (TOTP replies) route through fallback
           tgCmd.registerFallback((msg) => handlers.handleMessage(msg));
+
+          // Operator-only vault commands (gated by operatorChatId in TelegramCommander)
+          const operatorHandlers = new OperatorCommandHandlers({
+            store: depositorStoreLocal,
+            state,
+            audit: new AuditLog(depositorStoreLocal),
+            reply: (chatId, text) => tgCmd.reply(chatId, text),
+            nowMs: () => Date.now(),
+          });
+          tgCmd.registerOperatorCommand('pausevault', (msg) => operatorHandlers.handlePause(msg));
+          tgCmd.registerOperatorCommand('resumevault', (msg) => operatorHandlers.handleResume(msg));
+          tgCmd.registerOperatorCommand('vaultstatus', (msg) => operatorHandlers.handleStatus(msg));
+          tgCmd.registerOperatorCommand('forceprocess', (msg) => operatorHandlers.handleForceProcess(msg));
           logger.info('vault commands wired into telegram commander');
         } catch (e) {
           logger.error({ err: e }, 'vault wiring failed — vault commands disabled');

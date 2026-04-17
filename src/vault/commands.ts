@@ -3,6 +3,8 @@ import type { Enrollment } from './enrollment.js';
 import type { Cooldowns } from './cooldowns.js';
 import { DISCLAIMER_TEXT } from './disclaimer.js';
 import { AuditLog } from './audit.js';
+import { decrypt } from './encryption.js';
+import { verifyCode } from './totp.js';
 
 export interface ReplyFn {
   (chatId: number, text: string, extras?: { photoBase64?: string }): Promise<void>;
@@ -90,6 +92,84 @@ export class CommandHandlers {
         `/setwhitelist <addr> — set withdrawal destination (TOTP)\n` +
         `/cancelwhitelist — cancel pending whitelist change (TOTP)\n` +
         `/stats — vault TVL + NAV/share`,
+    );
+  }
+
+  // ── /deposit ───────────────────────────────────────────────────────────
+  async handleDeposit(msg: { chatId: number; userId: number }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      return;
+    }
+    this.pending.set(msg.userId, { kind: 'deposit_reveal' });
+    await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to reveal your deposit address.');
+  }
+
+  /**
+   * Consume the user's next plain-text message as the TOTP response to a
+   * pending action. No-op if there is no pending action for the user.
+   * Returns after dispatching to the appropriate branch.
+   */
+  async handleMessage(msg: { chatId: number; userId: number; text: string }): Promise<void> {
+    const pending = this.pending.get(msg.userId);
+    if (!pending) return;
+
+    switch (pending.kind) {
+      case 'deposit_reveal':
+        await this.respondDepositReveal(msg);
+        return;
+      default:
+        // Other branches wired in later sub-steps. Drop the pending entry to
+        // avoid leaking state if we hit an unhandled branch in dev.
+        return;
+    }
+  }
+
+  /**
+   * Verify the TOTP code in `msg.text` for `msg.userId`. On success, persist
+   * the new counter and return the accepted counter. On failure, return null.
+   * Always clears any pending action for the user.
+   */
+  private verifyTotp(userId: number, code: string): { ok: boolean } {
+    const user = this.deps.store.getUser(userId);
+    if (!user || user.totpEnrolledAt === null) return { ok: false };
+    const secrets = this.deps.store.getUserSecrets(userId);
+    if (!secrets || !secrets.totpSecretEnc || !secrets.totpSecretIv) return { ok: false };
+    const secretBase32 = decrypt(
+      secrets.totpSecretEnc,
+      secrets.totpSecretIv,
+      this.deps.masterKey,
+    ).toString('utf8');
+    const r = verifyCode({
+      secret: secretBase32,
+      code,
+      lastUsedCounter: user.totpLastUsedCounter,
+    });
+    if (!r.ok) return { ok: false };
+    this.deps.store.setTotpLastCounter(userId, r.counter);
+    return { ok: true };
+  }
+
+  private async respondDepositReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {
+    this.pending.delete(msg.userId);
+    const v = this.verifyTotp(msg.userId, msg.text.trim());
+    if (!v.ok) {
+      this.audit.write({
+        ts: this.deps.nowMs(), telegramId: msg.userId,
+        event: 'totp_verify_failed', details: { op: 'deposit_reveal' },
+      });
+      await this.deps.reply(msg.chatId, '2FA code invalid. Try /deposit again.');
+      return;
+    }
+    const user = this.deps.store.getUser(msg.userId)!;
+    this.audit.write({
+      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'deposit_reveal',
+    });
+    await this.deps.reply(
+      msg.chatId,
+      `Your deposit address (SOL + BERT):\n${user.depositAddress}\n\n` +
+        `Send SOL and/or BERT to this address. Funds will be swept + credited after the next tick.`,
     );
   }
 }

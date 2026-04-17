@@ -27,6 +27,92 @@ const SCHEMA_SQL = [
   "CREATE TABLE IF NOT EXISTS flags (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL, reason TEXT)",
   "CREATE TABLE IF NOT EXISTS operator_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, command TEXT NOT NULL, os_user TEXT NOT NULL)",
   "CREATE INDEX IF NOT EXISTS idx_rebalance_ts ON rebalance_log(ts)",
+  // ── Vault ────────────────────────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS vault_users (
+    telegram_id            INTEGER PRIMARY KEY,
+    role                   TEXT NOT NULL CHECK(role IN ('operator','depositor')),
+    deposit_address        TEXT NOT NULL UNIQUE,
+    deposit_secret_enc     BLOB NOT NULL,
+    deposit_secret_iv      BLOB NOT NULL,
+    totp_secret_enc        BLOB,
+    totp_secret_iv         BLOB,
+    totp_enrolled_at       INTEGER,
+    totp_last_used_counter INTEGER,
+    whitelist_address      TEXT,
+    whitelist_set_at       INTEGER,
+    disclaimer_at          INTEGER NOT NULL,
+    created_at             INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_users_deposit ON vault_users(deposit_address)`,
+
+  `CREATE TABLE IF NOT EXISTS vault_shares (
+    telegram_id INTEGER PRIMARY KEY REFERENCES vault_users(telegram_id),
+    shares      REAL NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS vault_deposits (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id       INTEGER NOT NULL,
+    inbound_tx_sig    TEXT NOT NULL UNIQUE,
+    sweep_tx_sig      TEXT,
+    sol_lamports      INTEGER NOT NULL,
+    bert_raw          INTEGER NOT NULL,
+    sol_usd           REAL NOT NULL,
+    bert_usd          REAL NOT NULL,
+    nav_per_share_at  REAL NOT NULL,
+    shares_minted     REAL NOT NULL,
+    confirmed_at      INTEGER NOT NULL,
+    swept_at          INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_deposits_user ON vault_deposits(telegram_id)`,
+
+  `CREATE TABLE IF NOT EXISTS vault_withdrawals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id       INTEGER NOT NULL,
+    status            TEXT NOT NULL CHECK(status IN ('queued','processing','completed','failed')),
+    destination       TEXT NOT NULL,
+    shares_burned     REAL NOT NULL,
+    fee_shares        REAL NOT NULL,
+    nav_per_share_at  REAL,
+    sol_lamports_out  INTEGER,
+    bert_raw_out      INTEGER,
+    tx_sig            TEXT,
+    failure_reason    TEXT,
+    queued_at         INTEGER NOT NULL,
+    processed_at      INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_withdrawals_status ON vault_withdrawals(status)`,
+
+  `CREATE TABLE IF NOT EXISTS vault_pending_whitelist_changes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id   INTEGER NOT NULL,
+    old_address   TEXT,
+    new_address   TEXT NOT NULL,
+    requested_at  INTEGER NOT NULL,
+    activates_at  INTEGER NOT NULL,
+    status        TEXT NOT NULL CHECK(status IN ('pending','activated','cancelled')),
+    cancel_reason TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_wl_pending
+     ON vault_pending_whitelist_changes(status, activates_at)`,
+
+  `CREATE TABLE IF NOT EXISTS vault_nav_snapshots (
+    ts               INTEGER PRIMARY KEY,
+    total_value_usd  REAL NOT NULL,
+    total_shares     REAL NOT NULL,
+    nav_per_share    REAL NOT NULL,
+    source           TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS vault_audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    telegram_id   INTEGER,
+    event         TEXT NOT NULL,
+    details_json  TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_audit_ts ON vault_audit_log(ts)`,
+  `CREATE INDEX IF NOT EXISTS idx_vault_audit_user ON vault_audit_log(telegram_id, ts)`,
 ];
 
 export class StateStore {

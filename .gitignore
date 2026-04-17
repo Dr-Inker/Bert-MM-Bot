@@ -8,3 +8,5 @@ coverage/
 *.tsbuildinfo
 state.db
 state.db-*
+
+.worktrees/

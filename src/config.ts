@@ -31,10 +31,23 @@ const NotifierSchema = z
   })
   .optional();
 
+const MevProtectionSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    blockEngineUrl: z
+      .string()
+      .url()
+      .default('https://mainnet.block-engine.jito.wtf'),
+    tipLamports: z.number().int().min(1_000).max(10_000_000).default(100_000),
+    bundleTimeoutMs: z.number().int().min(5_000).max(60_000).default(30_000),
+  })
+  .optional();
+
 const BotConfigSchema = z
   .object({
     venue: z.enum(['raydium', 'meteora']).default('raydium'),
     enabled: z.boolean(),
+    mevProtection: MevProtectionSchema,
     poolAddress: z.string().min(32),
     bertMint: z.string().min(32),
     rangeWidthPct: z.number().min(1).max(100),

@@ -9,6 +9,7 @@ import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
 import { TxSubmitter } from './txSubmitter.js';
+import { JitoClient } from './jitoClient.js';
 import { makeFetchers } from './priceFetchers.js';
 import { reconcile } from './reconciler.js';
 import { executeRebalance } from './rebalancer.js';
@@ -39,7 +40,23 @@ async function main(): Promise<void> {
   );
   await raydium.init();
 
-  const submitter = new TxSubmitter(raydium.getConnection(), payer);
+  const jito = cfg.mevProtection?.enabled
+    ? new JitoClient(raydium.getConnection(), payer, {
+        blockEngineUrl: cfg.mevProtection.blockEngineUrl,
+        tipLamports: cfg.mevProtection.tipLamports,
+        bundleTimeoutMs: cfg.mevProtection.bundleTimeoutMs,
+      })
+    : undefined;
+  if (jito) {
+    logger.info(
+      {
+        endpoint: cfg.mevProtection!.blockEngineUrl,
+        tipLamports: cfg.mevProtection!.tipLamports,
+      },
+      'mev protection enabled — swap-to-ratio will route through jito',
+    );
+  }
+  const submitter = new TxSubmitter(raydium.getConnection(), payer, jito);
   const fetchers = makeFetchers(raydium, cfg.poolAddress);
 
   // Fetch oracle price before reconciliation so USD bounds can be computed

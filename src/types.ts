@@ -45,9 +45,17 @@ export type Decision =
   | { kind: 'PAUSE'; reason: string }
   | { kind: 'ALERT_ONLY'; reason: string };
 
+export interface MevProtectionConfig {
+  enabled: boolean;
+  blockEngineUrl: string;
+  tipLamports: number;
+  bundleTimeoutMs: number;
+}
+
 export interface BotConfig {
   venue: 'raydium' | 'meteora';
   enabled: boolean;
+  mevProtection?: MevProtectionConfig;
   poolAddress: string;
   bertMint: string;
   rangeWidthPct: number;

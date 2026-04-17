@@ -28,3 +28,21 @@ notifier:
     webhookInfo: "https://replace-with-your-discord-info-webhook.example.com"
     webhookCritical: "https://replace-with-your-discord-critical-webhook.example.com"
 dryRun: false
+
+# MEV protection: routes swap-to-ratio transactions through Jito's private
+# block engine (no public mempool, no sandwich exposure). Recommended
+# whenever our pool is thin enough that a rebalance swap could be
+# sandwiched (i.e. roughly always for a sole-LP MM bot).
+#
+# When enabled, each protected tx appends a tip transfer to a Jito tip
+# account. If the Jito bundle doesn't land within bundleTimeoutMs, the bot
+# falls back to regular public-RPC submission (unsafe but ensures tx lands).
+#
+# Tip sizing: 100_000 lamports (~$0.009) is a reasonable baseline for
+# low-competition tokens; scale up in proportion to expected MEV extraction.
+# Professional arb bots commonly tip 100k–1M lamports.
+mevProtection:
+  enabled: false
+  blockEngineUrl: "https://mainnet.block-engine.jito.wtf"
+  tipLamports: 100000
+  bundleTimeoutMs: 30000

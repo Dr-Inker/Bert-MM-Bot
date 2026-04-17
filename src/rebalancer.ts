@@ -171,11 +171,13 @@ export async function executeRebalance(
         });
         // buildSwapToRatioTx may return an empty Transaction if no swap needed
         if (swapTx.instructions.length > 0) {
-          const swapSig = await submitter.submit(swapTx, {
+          // Swap-to-ratio is the prime sandwich target — route through Jito
+          // when configured. Falls back to public RPC if Jito doesn't land.
+          const swapSig = await submitter.submitProtected(swapTx, {
             priorityFeeMicroLamports: cfg.priorityFeeMicroLamports,
             dryRun: cfg.dryRun,
           });
-          logger.info({ swapSig }, 'swap to ratio submitted');
+          logger.info({ swapSig, mevProtected: true }, 'swap to ratio submitted');
           // Re-fetch balances after swap
           if (!cfg.dryRun) {
             const postSwapBalances = await raydium.getWalletBalances();

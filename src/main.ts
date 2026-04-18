@@ -522,6 +522,10 @@ async function main(): Promise<void> {
   let ticksInRange = 0;
   let ticksTotal = 0;
   let rebalancesThisHour = 0;
+  // Deduplicate PAUSE/ALERT_ONLY notifications: only notify on state transition
+  // (new reason), not every 30s tick. Cleared when decision returns to HOLD or
+  // REBALANCE so the next PAUSE/ALERT_ONLY re-alerts.
+  let lastAlertedDecisionReason: string | null = null;
   await notifier.send('INFO', `bert-mm-bot started (dryRun=${cfg.dryRun})`);
 
   // eslint-disable-next-line no-constant-condition
@@ -629,9 +633,18 @@ async function main(): Promise<void> {
           logger.info({ result }, 'rebalance complete');
         }
       } else if (decision.kind === 'PAUSE') {
-        await notifier.send('CRITICAL', `PAUSE: ${decision.reason}`);
+        if (decision.reason !== lastAlertedDecisionReason) {
+          await notifier.send('CRITICAL', `PAUSE: ${decision.reason}`);
+          lastAlertedDecisionReason = decision.reason;
+        }
       } else if (decision.kind === 'ALERT_ONLY') {
-        await notifier.send('WARN', `ALERT_ONLY: ${decision.reason}`);
+        if (decision.reason !== lastAlertedDecisionReason) {
+          await notifier.send('WARN', `ALERT_ONLY: ${decision.reason}`);
+          lastAlertedDecisionReason = decision.reason;
+        }
+      } else {
+        // HOLD / REBALANCE — reset dedup so the next PAUSE/ALERT_ONLY re-alerts.
+        lastAlertedDecisionReason = null;
       }
 
       // ─── Vault: drain withdrawals + activate due whitelist changes.

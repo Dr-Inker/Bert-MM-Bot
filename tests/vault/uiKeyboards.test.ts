@@ -38,6 +38,12 @@ describe('uiKeyboards — core', () => {
       'nav:settings',
       'act:stats',
     ]);
+    // Each label is padded with U+2003 em-space on both sides so narrow
+    // clients render a consistently-wide button (see builder comment).
+    for (const row of kb.inline_keyboard) {
+      expect(row[0].text.startsWith('\u2003')).toBe(true);
+      expect(row[0].text.endsWith('\u2003')).toBe(true);
+    }
   });
 
   it('cancelKeyboard has single Cancel button with callback_data=cancel', () => {

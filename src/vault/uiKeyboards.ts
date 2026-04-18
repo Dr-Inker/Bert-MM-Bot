@@ -14,19 +14,23 @@ export function welcomeKeyboard(): InlineKeyboardMarkup {
 }
 
 export function mainMenuKeyboard(): InlineKeyboardMarkup {
-  // One-button-per-row so each button takes the full chat-bubble width.
-  // Mixed-length text (e.g. "Deposit" vs "Whitelist") in paired rows
-  // renders as narrow left-leaning buttons on some Telegram clients,
-  // which looks unbalanced. Single-button rows are always centered and
-  // full-width regardless of client.
+  // One button per row, each label padded to ~24 visible chars with
+  // leading+trailing U+2003 em spaces. Some Telegram clients size inline
+  // buttons to the text width and left-align them in the row; padding
+  // forces a consistent, wider button that *looks* centered on every
+  // client (native-centered clients are unaffected since they already
+  // centre the already-padded text).
+  const PAD_BEFORE = '\u2003\u2003\u2003';   // 3 em-spaces = wide margin
+  const PAD_AFTER  = '\u2003\u2003\u2003';
+  const pad = (label: string) => `${PAD_BEFORE}${label}${PAD_AFTER}`;
   return {
     inline_keyboard: [
-      [{ text: '💰 Deposit',   callback_data: 'act:deposit' }],
-      [{ text: '📊 Balance',   callback_data: 'act:balance' }],
-      [{ text: '💸 Withdraw',  callback_data: 'act:withdraw' }],
-      [{ text: '🎯 Whitelist', callback_data: 'wl:set' }],
-      [{ text: '⚙️ Settings',  callback_data: 'nav:settings' }],
-      [{ text: '📈 Stats',     callback_data: 'act:stats' }],
+      [{ text: pad('💰 Deposit'),   callback_data: 'act:deposit' }],
+      [{ text: pad('📊 Balance'),   callback_data: 'act:balance' }],
+      [{ text: pad('💸 Withdraw'),  callback_data: 'act:withdraw' }],
+      [{ text: pad('🎯 Whitelist'), callback_data: 'wl:set' }],
+      [{ text: pad('⚙️ Settings'),  callback_data: 'nav:settings' }],
+      [{ text: pad('📈 Stats'),     callback_data: 'act:stats' }],
     ],
   };
 }

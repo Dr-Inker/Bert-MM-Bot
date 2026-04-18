@@ -254,7 +254,11 @@ export class CommandHandlers {
       );
       return;
     }
-    await this.deps.reply(msg.chatId, 'Account ready.', this.kb(mainMenuKeyboard()));
+    await this.deps.reply(
+      msg.chatId,
+      '✅ Account ready.\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+      this.kb(mainMenuKeyboard()),
+    );
   }
 
   // ── /accept (disclaimer) ──────────────────────────────────────────────
@@ -392,7 +396,11 @@ export class CommandHandlers {
       this.totpSetupFailures.delete(msg.userId);
       this.rateLimiter.recordSuccess(msg.userId);
       this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
-      await this.deps.reply(msg.chatId, '✅ Account ready.', this.kb(mainMenuKeyboard()));
+      await this.deps.reply(
+        msg.chatId,
+        '✅ Account ready.\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+        this.kb(mainMenuKeyboard()),
+      );
       return;
     }
     const failures = (this.totpSetupFailures.get(msg.userId) ?? 0) + 1;
@@ -577,7 +585,11 @@ export class CommandHandlers {
       );
       return;
     }
-    await this.deps.reply(msg.chatId, '🏦 BertMM Vault', this.kb(mainMenuKeyboard()));
+    await this.deps.reply(
+      msg.chatId,
+      '🏦 BertMM Vault\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+      this.kb(mainMenuKeyboard()),
+    );
   }
 
   // ── /withdraw ─────────────────────────────────────────────────────────

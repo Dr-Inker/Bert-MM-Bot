@@ -14,20 +14,19 @@ export function welcomeKeyboard(): InlineKeyboardMarkup {
 }
 
 export function mainMenuKeyboard(): InlineKeyboardMarkup {
+  // One-button-per-row so each button takes the full chat-bubble width.
+  // Mixed-length text (e.g. "Deposit" vs "Whitelist") in paired rows
+  // renders as narrow left-leaning buttons on some Telegram clients,
+  // which looks unbalanced. Single-button rows are always centered and
+  // full-width regardless of client.
   return {
     inline_keyboard: [
-      [
-        { text: '💰 Deposit',    callback_data: 'act:deposit' },
-        { text: '📊 Balance',    callback_data: 'act:balance' },
-      ],
-      [
-        { text: '💸 Withdraw',   callback_data: 'act:withdraw' },
-        { text: '🎯 Whitelist',  callback_data: 'wl:set' },
-      ],
-      [
-        { text: '⚙️ Settings',   callback_data: 'nav:settings' },
-        { text: '📈 Stats',      callback_data: 'act:stats' },
-      ],
+      [{ text: '💰 Deposit',   callback_data: 'act:deposit' }],
+      [{ text: '📊 Balance',   callback_data: 'act:balance' }],
+      [{ text: '💸 Withdraw',  callback_data: 'act:withdraw' }],
+      [{ text: '🎯 Whitelist', callback_data: 'wl:set' }],
+      [{ text: '⚙️ Settings',  callback_data: 'nav:settings' }],
+      [{ text: '📈 Stats',     callback_data: 'act:stats' }],
     ],
   };
 }

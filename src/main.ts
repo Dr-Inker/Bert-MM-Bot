@@ -455,6 +455,7 @@ async function main(): Promise<void> {
               maxDailyWithdrawalsPerUser: cfg.vault.maxDailyWithdrawalsPerUser,
               maxDailyWithdrawalUsdPerUser: cfg.vault.maxDailyWithdrawalUsdPerUser,
               maxPendingWithdrawals: cfg.vault.maxPendingWithdrawals,
+              uiButtons: cfg.vault.uiButtons,
             },
             getNav,
             nowMs: () => Date.now(),

@@ -32,6 +32,14 @@ export interface CommandsConfig {
   maxDailyWithdrawalsPerUser: number;
   maxDailyWithdrawalUsdPerUser: number;
   maxPendingWithdrawals: number;
+  /**
+   * When false, reply handlers do NOT attach inline keyboards (reply_markup).
+   * Use for rollback without redeploying (spec §8). The callback router is
+   * gated separately in main.ts (same flag), so with uiButtons=false
+   * callback_query is never polled — keyboards are inert anyway, this
+   * prevents them from appearing at all.
+   */
+  uiButtons: boolean;
 }
 
 export interface CommandsDeps {
@@ -177,12 +185,24 @@ export class CommandHandlers {
     this.pending.delete(userId);
   }
 
+  /**
+   * Gate keyboard attachment on the `uiButtons` config flag. When the flag is
+   * off (rollback via `vault.uiButtons=false`), returns undefined so the
+   * reply_markup is never sent. Use for the `extras` arg of `reply()`:
+   *   await this.deps.reply(chatId, text, this.kb(someKeyboard));
+   * When combining with photoBase64 use object spread:
+   *   await this.deps.reply(chatId, text, { photoBase64, ...this.kb(kb) });
+   */
+  private kb(keyboard: InlineKeyboardMarkup): { keyboard: InlineKeyboardMarkup } | undefined {
+    return this.deps.config.uiButtons ? { keyboard } : undefined;
+  }
+
   // ── /account ───────────────────────────────────────────────────────────
   async handleAccount(msg: { chatId: number; userId: number }): Promise<void> {
     const existing = this.deps.store.getUser(msg.userId);
     if (!existing) {
       this.pending.set(msg.userId, { kind: 'disclaimer' });
-      await this.deps.reply(msg.chatId, DISCLAIMER_TEXT, { keyboard: disclaimerKeyboard() });
+      await this.deps.reply(msg.chatId, DISCLAIMER_TEXT, this.kb(disclaimerKeyboard()));
       return;
     }
     if (existing.totpEnrolledAt === null) {
@@ -196,11 +216,11 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `🔐 Scan this QR in Google Auth or Authy.\nOr enter secret manually: ${secretBase32}\n\nReply with the 6-digit code.`,
-        { photoBase64, keyboard: cancelKeyboard() },
+        { photoBase64, ...this.kb(cancelKeyboard()) },
       );
       return;
     }
-    await this.deps.reply(msg.chatId, 'Account ready.', { keyboard: mainMenuKeyboard() });
+    await this.deps.reply(msg.chatId, 'Account ready.', this.kb(mainMenuKeyboard()));
   }
 
   // ── /accept (disclaimer) ──────────────────────────────────────────────
@@ -231,7 +251,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `🔐 Scan this QR in Google Auth or Authy.\nOr enter secret manually: ${secretBase32}\n\nReply with the 6-digit code.`,
-      { photoBase64, keyboard: cancelKeyboard() },
+      { photoBase64, ...this.kb(cancelKeyboard()) },
     );
   }
 
@@ -254,7 +274,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       'Reply with your current 6-digit 2FA code to reveal your deposit address.',
-      { keyboard: cancelKeyboard() },
+      this.kb(cancelKeyboard()),
     );
   }
 
@@ -330,7 +350,7 @@ export class CommandHandlers {
       this.totpSetupFailures.delete(msg.userId);
       this.rateLimiter.recordSuccess(msg.userId);
       this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
-      await this.deps.reply(msg.chatId, '✅ Account ready.', { keyboard: mainMenuKeyboard() });
+      await this.deps.reply(msg.chatId, '✅ Account ready.', this.kb(mainMenuKeyboard()));
       return;
     }
     const failures = (this.totpSetupFailures.get(msg.userId) ?? 0) + 1;
@@ -354,7 +374,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Too many failed attempts. Locked for ${remaining}.`,
-        { keyboard: errorKeyboard({ retryCallback: 'nav:create_account' }) },
+        this.kb(errorKeyboard({ retryCallback: 'nav:create_account' })),
       );
       return;
     }
@@ -364,12 +384,12 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Too many invalid codes. Start over via /account.`,
-        { keyboard: errorKeyboard({ retryCallback: 'nav:create_account' }) },
+        this.kb(errorKeyboard({ retryCallback: 'nav:create_account' })),
       );
       return;
     }
     this.totpSetupFailures.set(msg.userId, failures);
-    await this.deps.reply(msg.chatId, 'Invalid code. Try again.', { keyboard: cancelKeyboard() });
+    await this.deps.reply(msg.chatId, 'Invalid code. Try again.', this.kb(cancelKeyboard()));
   }
 
   /**
@@ -409,7 +429,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       'Reply with your current 6-digit 2FA code to view your balance.',
-      { keyboard: cancelKeyboard() },
+      this.kb(cancelKeyboard()),
     );
   }
 
@@ -422,14 +442,14 @@ export class CommandHandlers {
         await this.deps.reply(
           msg.chatId,
           `Too many failed attempts. Locked for ${remaining}.`,
-          { keyboard: errorKeyboard({ retryCallback: 'act:balance' }) },
+          this.kb(errorKeyboard({ retryCallback: 'act:balance' })),
         );
         return;
       }
       await this.deps.reply(
         msg.chatId,
         '2FA code invalid. Try /balance again.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:balance' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:balance' })),
       );
       return;
     }
@@ -448,7 +468,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
-      { keyboard: postBalanceKeyboard() },
+      this.kb(postBalanceKeyboard()),
     );
   }
 
@@ -483,7 +503,7 @@ export class CommandHandlers {
         `TVL: $${tvlStr}\n` +
         `NAV/share: $${navPerShare.toFixed(2)}\n` +
         deltaLine,
-      enrolled ? { keyboard: postActionKeyboard() } : undefined,
+      enrolled ? this.kb(postActionKeyboard()) : undefined,
     );
   }
 
@@ -494,11 +514,11 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         '👋 Welcome to BertMM Vault. You need to create an account first.',
-        { keyboard: welcomeKeyboard() },
+        this.kb(welcomeKeyboard()),
       );
       return;
     }
-    await this.deps.reply(msg.chatId, '🏦 BertMM Vault', { keyboard: mainMenuKeyboard() });
+    await this.deps.reply(msg.chatId, '🏦 BertMM Vault', this.kb(mainMenuKeyboard()));
   }
 
   // ── /withdraw ─────────────────────────────────────────────────────────
@@ -517,7 +537,7 @@ export class CommandHandlers {
     const raw = parts[1];
     if (!raw) {
       this.pending.set(msg.userId, { kind: 'withdraw_amount_entry' });
-      await this.deps.reply(msg.chatId, 'How much to withdraw?', { keyboard: withdrawAmountKeyboard() });
+      await this.deps.reply(msg.chatId, 'How much to withdraw?', this.kb(withdrawAmountKeyboard()));
       return;
     }
 
@@ -589,7 +609,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Reply with your 2FA code to queue a $${amountUsd.toFixed(2)} withdrawal to ${user.whitelistAddress}.`,
-      { keyboard: cancelKeyboard() },
+      this.kb(cancelKeyboard()),
     );
   }
 
@@ -627,7 +647,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Withdraw $${n.toFixed(2)} to ${user.whitelistAddress.slice(0, 6)}…${user.whitelistAddress.slice(-4)}?\nReply with your 6-digit code to confirm.`,
-      { keyboard: cancelKeyboard() },
+      this.kb(cancelKeyboard()),
     );
   }
 
@@ -643,14 +663,14 @@ export class CommandHandlers {
         await this.deps.reply(
           msg.chatId,
           `Too many failed attempts. Locked for ${remaining}.`,
-          { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+          this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
         );
         return;
       }
       await this.deps.reply(
         msg.chatId,
         '2FA code invalid. Try /withdraw again.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
@@ -659,7 +679,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'No whitelist address set.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
@@ -668,7 +688,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'NAV unavailable — try again shortly.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
@@ -677,7 +697,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'NAV unavailable — try again shortly.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
@@ -697,7 +717,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Queued! Your withdrawal of $${pending.amountUsd.toFixed(2)} will be processed on the next tick.`,
-      { keyboard: postActionKeyboard() },
+      this.kb(postActionKeyboard()),
     );
   }
 
@@ -714,7 +734,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'Usage: /setwhitelist <solana-address>',
-        { keyboard: cancelKeyboard() },
+        this.kb(cancelKeyboard()),
       );
       return;
     }
@@ -725,7 +745,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'That does not look like a valid Solana address.',
-        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+        this.kb(errorKeyboard({ retryCallback: 'wl:set' })),
       );
       return;
     }
@@ -735,7 +755,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `First whitelist setup. Reply with your 2FA code to set ${addr} immediately.`,
-        { keyboard: cancelKeyboard() },
+        this.kb(cancelKeyboard()),
       );
     } else {
       this.pending.set(msg.userId, { kind: 'setwhitelist_change', address: addr });
@@ -744,7 +764,7 @@ export class CommandHandlers {
         `Whitelist change requested: ${addr}.\n` +
           `Reply with your 2FA code to enqueue. Changes activate after a 24-hour cooldown; ` +
           `use /cancelwhitelist before it activates to abort.`,
-        { keyboard: cancelKeyboard() },
+        this.kb(cancelKeyboard()),
       );
     }
   }
@@ -761,7 +781,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       'Reply with your 2FA code to cancel the pending whitelist change.',
-      { keyboard: cancelKeyboard() },
+      this.kb(cancelKeyboard()),
     );
   }
 
@@ -783,7 +803,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         'That does not look like a valid Solana address.',
-        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+        this.kb(errorKeyboard({ retryCallback: 'wl:set' })),
       );
       return;
     }
@@ -808,14 +828,14 @@ export class CommandHandlers {
         await this.deps.reply(
           msg.chatId,
           `Too many failed attempts. Locked for ${remaining}.`,
-          { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+          this.kb(errorKeyboard({ retryCallback: 'wl:set' })),
         );
         return;
       }
       await this.deps.reply(
         msg.chatId,
         '2FA code invalid. Try /setwhitelist again.',
-        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+        this.kb(errorKeyboard({ retryCallback: 'wl:set' })),
       );
       return;
     }
@@ -830,14 +850,14 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Whitelist set to ${pending.address} (effective immediately).`,
-        { keyboard: postActionKeyboard() },
+        this.kb(postActionKeyboard()),
       );
     } else {
       const activates = new Date(result.activatesAt).toISOString();
       await this.deps.reply(
         msg.chatId,
         `Whitelist change queued. Activates at ${activates}. Use /cancelwhitelist to abort before then.`,
-        { keyboard: postActionKeyboard() },
+        this.kb(postActionKeyboard()),
       );
     }
   }
@@ -853,14 +873,14 @@ export class CommandHandlers {
         await this.deps.reply(
           msg.chatId,
           `Too many failed attempts. Locked for ${remaining}.`,
-          { keyboard: errorKeyboard({ retryCallback: 'wl:cancel' }) },
+          this.kb(errorKeyboard({ retryCallback: 'wl:cancel' })),
         );
         return;
       }
       await this.deps.reply(
         msg.chatId,
         '2FA code invalid. Try /cancelwhitelist again.',
-        { keyboard: errorKeyboard({ retryCallback: 'wl:cancel' }) },
+        this.kb(errorKeyboard({ retryCallback: 'wl:cancel' })),
       );
       return;
     }
@@ -874,7 +894,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       ok ? 'Pending whitelist change cancelled.' : 'Nothing to cancel — no pending whitelist change.',
-      { keyboard: postActionKeyboard() },
+      this.kb(postActionKeyboard()),
     );
   }
 
@@ -887,14 +907,14 @@ export class CommandHandlers {
         await this.deps.reply(
           msg.chatId,
           `Too many failed attempts. Locked for ${remaining}.`,
-          { keyboard: errorKeyboard({ retryCallback: 'act:deposit' }) },
+          this.kb(errorKeyboard({ retryCallback: 'act:deposit' })),
         );
         return;
       }
       await this.deps.reply(
         msg.chatId,
         '2FA code invalid. Try /deposit again.',
-        { keyboard: errorKeyboard({ retryCallback: 'act:deposit' }) },
+        this.kb(errorKeyboard({ retryCallback: 'act:deposit' })),
       );
       return;
     }
@@ -906,7 +926,7 @@ export class CommandHandlers {
       msg.chatId,
       `Your deposit address (SOL + BERT):\n${user.depositAddress}\n\n` +
         `Send SOL and/or BERT to this address. Funds will be swept + credited after the next tick.`,
-      { keyboard: postDepositKeyboard() },
+      this.kb(postDepositKeyboard()),
     );
   }
 }

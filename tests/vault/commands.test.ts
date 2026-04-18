@@ -11,13 +11,15 @@ import { join } from 'node:path';
 
 const MASTER_KEY = Buffer.alloc(32, 42);
 
-function makeConfig() {
+function makeConfig(overrides: Partial<{ uiButtons: boolean }> = {}) {
   return {
     withdrawalFeeBps: 30,
     minWithdrawalUsd: 10,
     maxDailyWithdrawalsPerUser: 3,
     maxDailyWithdrawalUsdPerUser: 1000,
     maxPendingWithdrawals: 20,
+    uiButtons: true,
+    ...overrides,
   };
 }
 
@@ -1065,6 +1067,95 @@ describe('CommandHandlers — withdraw/whitelist keyboards', () => {
       const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
       const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
       expect(flat).toEqual(['cancel']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+});
+
+/**
+ * I2: vault.uiButtons=false rollback must actually suppress reply_markup.
+ * Previously the flag only prevented callback router registration, but handlers
+ * attached reply_markup unconditionally — users saw buttons that tapped into
+ * silent no-ops because callback_query was never polled.
+ */
+describe('CommandHandlers — uiButtons=false rollback (I2)', () => {
+  async function buildWithFlag(uiButtons: boolean) {
+    const { CommandHandlers } = await import('../../src/vault/commands.js');
+    const dir = mkdtempSync(join(tmpdir(), 'bertmm-uib-'));
+    const state = new StateStore(join(dir, 'state.db'));
+    state.init();
+    const store = new DepositorStore(state);
+    const enrollment = new Enrollment({ store, masterKey: MASTER_KEY, ensureAta: async () => {} });
+    const cooldowns = new Cooldowns({ store, cooldownMs: 24 * 3600 * 1000 });
+    const reply = vi.fn(async () => {});
+    const navProvider = { totalUsd: 0, totalShares: 0 };
+    const handlers = new CommandHandlers({
+      store, enrollment, cooldowns, masterKey: MASTER_KEY, reply,
+      config: makeConfig({ uiButtons }),
+      getNav: async () => navProvider,
+      nowMs: () => 1_000_000,
+    });
+    return { dir, state, store, enrollment, reply, handlers };
+  }
+
+  it('uiButtons=true: handleMenu reply attaches keyboard (baseline)', async () => {
+    const h = await buildWithFlag(true);
+    try {
+      await h.enrollment.accept({ telegramId: 7, now: 100 });
+      const { secretBase32 } = await h.enrollment.beginTotpEnrollment({ telegramId: 7 });
+      const { TOTP } = await import('otpauth');
+      const code = new TOTP({ secret: secretBase32 }).generate();
+      await h.enrollment.confirmTotp({ telegramId: 7, code, now: 101 });
+      h.reply.mockClear();
+      await h.handlers.handleMenu({ chatId: 5, userId: 7 });
+      const [, , extras] = h.reply.mock.calls[0];
+      expect(extras?.keyboard).toBeDefined();
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('uiButtons=false: handleMenu reply has NO keyboard in extras', async () => {
+    const h = await buildWithFlag(false);
+    try {
+      await h.enrollment.accept({ telegramId: 7, now: 100 });
+      const { secretBase32 } = await h.enrollment.beginTotpEnrollment({ telegramId: 7 });
+      const { TOTP } = await import('otpauth');
+      const code = new TOTP({ secret: secretBase32 }).generate();
+      await h.enrollment.confirmTotp({ telegramId: 7, code, now: 101 });
+      h.reply.mockClear();
+      await h.handlers.handleMenu({ chatId: 5, userId: 7 });
+      const [, , extras] = h.reply.mock.calls[0];
+      expect(extras?.keyboard).toBeUndefined();
+      // Welcome-on-non-enrolled also suppressed:
+      h.reply.mockClear();
+      await h.handlers.handleMenu({ chatId: 5, userId: 999 });
+      expect(h.reply.mock.calls[0][2]?.keyboard).toBeUndefined();
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('uiButtons=false: QR enrollment still sends photoBase64 but no keyboard', async () => {
+    const h = await buildWithFlag(false);
+    try {
+      await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+      // seed pending=disclaimer and accept to reach TOTP QR step
+      await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+      // Last reply should be the TOTP QR reveal.
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const extras = last[2];
+      expect(extras?.photoBase64).toBeDefined();
+      expect(extras?.keyboard).toBeUndefined();
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('uiButtons=false: handleStats reply has no keyboard even when enrolled', async () => {
+    const h = await buildWithFlag(false);
+    try {
+      await h.enrollment.accept({ telegramId: 7, now: 100 });
+      const { secretBase32 } = await h.enrollment.beginTotpEnrollment({ telegramId: 7 });
+      const { TOTP } = await import('otpauth');
+      const code = new TOTP({ secret: secretBase32 }).generate();
+      await h.enrollment.confirmTotp({ telegramId: 7, code, now: 101 });
+      h.reply.mockClear();
+      await h.handlers.handleStats({ chatId: 5, userId: 7 });
+      expect(h.reply.mock.calls[0][2]?.keyboard).toBeUndefined();
     } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
   });
 });

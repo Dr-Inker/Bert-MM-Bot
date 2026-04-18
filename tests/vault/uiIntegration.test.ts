@@ -41,6 +41,7 @@ describe('UI integration — button flow → queued withdrawal', () => {
         maxDailyWithdrawalsPerUser: 3,
         maxDailyWithdrawalUsdPerUser: 1000,
         maxPendingWithdrawals: 20,
+        uiButtons: true,
       },
       getNav: async () => ({ totalUsd: 100, totalShares: 50 }),
       nowMs: () => Date.now(),

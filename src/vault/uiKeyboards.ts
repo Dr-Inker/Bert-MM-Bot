@@ -24,7 +24,7 @@ export function mainMenuKeyboard(): InlineKeyboardMarkup {
   // survive the round trip and force a visibly wider button. Padding
   // is symmetric so the real text sits in the middle of its half-row
   // on left-aligning clients too.
-  const TARGET = 18;        // visual cells per button label
+  const TARGET = 24;        // visual cells per button label
   const NBSP = '\u00A0';
   const pad = (s: string): string => {
     const visual = [...s].reduce((n, ch) => n + (ch.codePointAt(0)! > 0xffff ? 2 : 1), 0);

@@ -25,14 +25,14 @@ describe('uiKeyboards — core', () => {
     expect(kb.inline_keyboard[0][0].text).toMatch(/Create account/i);
   });
 
-  it('mainMenuKeyboard has Deposit, Balance, Withdraw, Settings, Stats in 3 rows', () => {
+  it('mainMenuKeyboard has Deposit, Balance, Withdraw, Whitelist, Settings, Stats in 3 rows', () => {
     const kb = mainMenuKeyboard();
     expect(kb.inline_keyboard.length).toBe(3);
     const flat = kb.inline_keyboard.flat().map(b => b.callback_data);
     expect(flat).toEqual([
       'act:deposit',  'act:balance',
-      'act:withdraw', 'nav:settings',
-      'act:stats',
+      'act:withdraw', 'wl:set',
+      'nav:settings', 'act:stats',
     ]);
   });
 

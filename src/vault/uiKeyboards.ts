@@ -17,15 +17,16 @@ export function mainMenuKeyboard(): InlineKeyboardMarkup {
   return {
     inline_keyboard: [
       [
-        { text: '💰 Deposit',  callback_data: 'act:deposit' },
-        { text: '📊 Balance',  callback_data: 'act:balance' },
+        { text: '💰 Deposit',    callback_data: 'act:deposit' },
+        { text: '📊 Balance',    callback_data: 'act:balance' },
       ],
       [
-        { text: '💸 Withdraw', callback_data: 'act:withdraw' },
-        { text: '⚙️ Settings', callback_data: 'nav:settings' },
+        { text: '💸 Withdraw',   callback_data: 'act:withdraw' },
+        { text: '🎯 Whitelist',  callback_data: 'wl:set' },
       ],
       [
-        { text: '📈 Stats',    callback_data: 'act:stats' },
+        { text: '⚙️ Settings',   callback_data: 'nav:settings' },
+        { text: '📈 Stats',      callback_data: 'act:stats' },
       ],
     ],
   };

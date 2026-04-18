@@ -70,6 +70,7 @@ export type PendingAction =
   | { kind: 'balance_reveal' }
   | { kind: 'withdraw_amount_entry' }              // NEW: awaiting free-text USD amount
   | { kind: 'withdraw'; amountUsd: number }
+  | { kind: 'setwhitelist_address_entry' }         // I1: awaiting free-text address (from wl:set button)
   | { kind: 'setwhitelist_first'; address: string }
   | { kind: 'setwhitelist_change'; address: string }
   | { kind: 'cancelwhitelist' };
@@ -297,6 +298,9 @@ export class CommandHandlers {
         return;
       case 'withdraw':
         await this.respondWithdraw(msg, pending);
+        return;
+      case 'setwhitelist_address_entry':
+        await this.respondSetWhitelistAddressEntry(msg);
         return;
       case 'totp_setup_confirm':
         await this.respondTotpSetupConfirm(msg);
@@ -759,6 +763,37 @@ export class CommandHandlers {
       'Reply with your 2FA code to cancel the pending whitelist change.',
       { keyboard: cancelKeyboard() },
     );
+  }
+
+  /**
+   * Consume a free-text Solana address sent by the user after the wl:set
+   * button prompt. Validates the address; on success, delegates to the
+   * existing handleSetWhitelist flow (which picks the first-time vs change
+   * cooldown branch and prompts for TOTP).
+   */
+  private async respondSetWhitelistAddressEntry(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    this.pending.delete(msg.userId);
+    const addr = msg.text.trim();
+    try {
+      // eslint-disable-next-line no-new
+      new PublicKey(addr);
+    } catch {
+      await this.deps.reply(
+        msg.chatId,
+        'That does not look like a valid Solana address.',
+        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+      );
+      return;
+    }
+    // Reuse the typed-command path: synthesize '/setwhitelist <addr>' so the
+    // first-time vs change cooldown logic stays in one place.
+    await this.handleSetWhitelist({
+      chatId: msg.chatId,
+      userId: msg.userId,
+      text: `/setwhitelist ${addr}`,
+    });
   }
 
   private async respondSetWhitelist(

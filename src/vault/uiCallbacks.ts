@@ -56,7 +56,14 @@ export function makeCallbackRouter(deps: RouterDeps) {
         );
         return;
 
-      case 'wl:set':             return handlers.handleSetWhitelist({ ...ctx, text: '/setwhitelist' });
+      case 'wl:set':
+        handlers.setPending(q.userId, { kind: 'setwhitelist_address_entry' });
+        await reply(
+          q.chatId,
+          'Paste the Solana address you want withdrawals sent to.\n(Must be a regular wallet, not a program account.)',
+          { keyboard: cancelKeyboard() },
+        );
+        return;
       case 'wl:cancel':          return handlers.handleCancelWhitelist(ctx);
 
       case 'cancel':

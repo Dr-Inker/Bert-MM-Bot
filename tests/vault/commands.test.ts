@@ -448,6 +448,41 @@ describe('CommandHandlers — /setwhitelist + /cancelwhitelist', () => {
     const [, text] = h.reply.mock.calls[0];
     expect(text).toMatch(/nothing|no pending/i);
   });
+
+  // I1: wl:set button sets pending=setwhitelist_address_entry; the user's
+  // next plain-text reply is the Solana address. Valid → transitions into
+  // setwhitelist_first/setwhitelist_change (TOTP gate). Invalid → error reply.
+  it('setwhitelist_address_entry: valid address transitions to setwhitelist_first when no whitelist set', async () => {
+    await enrollFully(h, 7);
+    h.handlers.setPending(7, { kind: 'setwhitelist_address_entry' });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: ADDR1 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('setwhitelist_first');
+    // Prompts for TOTP (reused handleSetWhitelist reply).
+    const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+    expect(last[1]).toMatch(/2FA|code/i);
+  });
+
+  it('setwhitelist_address_entry: valid address transitions to setwhitelist_change when whitelist already set', async () => {
+    await enrollFully(h, 7);
+    h.store.setWhitelistImmediate({ telegramId: 7, address: ADDR1, ts: 100 });
+    h.handlers.setPending(7, { kind: 'setwhitelist_address_entry' });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: ADDR2 });
+    expect(h.handlers.pendingFor(7)?.kind).toBe('setwhitelist_change');
+    const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+    expect(last[1]).toMatch(/24|cooldown|cancelwhitelist/i);
+  });
+
+  it('setwhitelist_address_entry: invalid address → error reply with retry keyboard, pending cleared', async () => {
+    await enrollFully(h, 7);
+    h.handlers.setPending(7, { kind: 'setwhitelist_address_entry' });
+    await h.handlers.handleMessage({ chatId: 5, userId: 7, text: 'not-a-real-solana-address' });
+    expect(h.handlers.pendingFor(7)).toBeUndefined();
+    const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+    expect(last[1]).toMatch(/does not look like|invalid.*address/i);
+    const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+    expect(flat).toContain('wl:set');
+    expect(flat).toContain('nav:home');
+  });
 });
 
 describe('CommandHandlers — /withdraw', () => {

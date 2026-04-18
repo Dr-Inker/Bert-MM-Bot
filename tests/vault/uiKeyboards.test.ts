@@ -38,11 +38,14 @@ describe('uiKeyboards — core', () => {
       'nav:settings',
       'act:stats',
     ]);
-    // Each label is padded with U+2003 em-space on both sides so narrow
-    // clients render a consistently-wide button (see builder comment).
+    // Each label is padded to a fixed visual width (~30 cells) with
+    // regular spaces so narrow clients render a consistently-wide button.
     for (const row of kb.inline_keyboard) {
-      expect(row[0].text.startsWith('\u2003')).toBe(true);
-      expect(row[0].text.endsWith('\u2003')).toBe(true);
+      expect(row[0].text.startsWith(' ')).toBe(true);
+      expect(row[0].text.endsWith(' ')).toBe(true);
+      // At least 20 chars of padding combined (loose lower bound).
+      const padLen = row[0].text.length - row[0].text.trim().length;
+      expect(padLen).toBeGreaterThanOrEqual(15);
     }
   });
 

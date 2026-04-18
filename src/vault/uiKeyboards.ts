@@ -14,23 +14,29 @@ export function welcomeKeyboard(): InlineKeyboardMarkup {
 }
 
 export function mainMenuKeyboard(): InlineKeyboardMarkup {
-  // One button per row, each label padded to ~24 visible chars with
-  // leading+trailing U+2003 em spaces. Some Telegram clients size inline
-  // buttons to the text width and left-align them in the row; padding
-  // forces a consistent, wider button that *looks* centered on every
-  // client (native-centered clients are unaffected since they already
-  // centre the already-padded text).
-  const PAD_BEFORE = '\u2003\u2003\u2003';   // 3 em-spaces = wide margin
-  const PAD_AFTER  = '\u2003\u2003\u2003';
-  const pad = (label: string) => `${PAD_BEFORE}${label}${PAD_AFTER}`;
+  // Pad each single-button-row label to a fixed ~30-char visible width
+  // with regular spaces, centred around the real label. Some Telegram
+  // clients size inline buttons to the text width and left-align them
+  // in the row; a heavily-padded fixed-width label forces a consistent
+  // wide button that visually centres the text regardless of client
+  // rendering rules.
+  const TARGET = 30;
+  const center = (s: string): string => {
+    // Count emoji as 2 visual cells (close enough for our labels).
+    const visual = [...s].reduce((n, ch) => n + (ch.codePointAt(0)! > 0xffff ? 2 : 1), 0);
+    const pad = Math.max(0, TARGET - visual);
+    const left = Math.floor(pad / 2);
+    const right = pad - left;
+    return ' '.repeat(left) + s + ' '.repeat(right);
+  };
   return {
     inline_keyboard: [
-      [{ text: pad('💰 Deposit'),   callback_data: 'act:deposit' }],
-      [{ text: pad('📊 Balance'),   callback_data: 'act:balance' }],
-      [{ text: pad('💸 Withdraw'),  callback_data: 'act:withdraw' }],
-      [{ text: pad('🎯 Whitelist'), callback_data: 'wl:set' }],
-      [{ text: pad('⚙️ Settings'),  callback_data: 'nav:settings' }],
-      [{ text: pad('📈 Stats'),     callback_data: 'act:stats' }],
+      [{ text: center('💰 Deposit'),   callback_data: 'act:deposit' }],
+      [{ text: center('📊 Balance'),   callback_data: 'act:balance' }],
+      [{ text: center('💸 Withdraw'),  callback_data: 'act:withdraw' }],
+      [{ text: center('🎯 Whitelist'), callback_data: 'wl:set' }],
+      [{ text: center('⚙️ Settings'),  callback_data: 'nav:settings' }],
+      [{ text: center('📈 Stats'),     callback_data: 'act:stats' }],
     ],
   };
 }

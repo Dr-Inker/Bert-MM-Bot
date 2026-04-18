@@ -30,6 +30,7 @@ export interface ReplyFn {
       photoBase64?: string;
       keyboard?: InlineKeyboardMarkup;
       parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML';
+      selfDestructMs?: number;
     },
   ): Promise<void>;
 }
@@ -248,8 +249,8 @@ export class CommandHandlers {
       const photoBase64 = dataUrl.replace(/^data:image\/png;base64,/, '');
       await this.deps.reply(
         msg.chatId,
-        `🔐 Scan this QR in Google Auth or Authy.\n\nOr enter the secret manually (tap to copy):\n\`${secretBase32}\`\n\nReply with the 6-digit code.`,
-        { photoBase64, parseMode: 'Markdown', ...this.kb(cancelKeyboard()) },
+        `🔐 Scan this QR in Google Auth or Authy.\n\nOr enter the secret manually (tap to copy):\n\`${secretBase32}\`\n\nReply with the 6-digit code.\n\n⏳ This message self-destructs in 5 minutes for security — scan or copy the secret now.`,
+        { photoBase64, parseMode: 'Markdown', selfDestructMs: 5 * 60 * 1000, ...this.kb(cancelKeyboard()) },
       );
       return;
     }

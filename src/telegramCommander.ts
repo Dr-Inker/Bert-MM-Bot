@@ -176,16 +176,26 @@ export class TelegramCommander {
   /** Send a reply to the given chat. Public so handlers registered from main.ts can use it.
    *  Optionally attaches an inline keyboard (reply_markup) and/or sends as a photo caption.
    *  When photoBase64 is provided, the Bot API endpoint switches from sendMessage to sendPhoto.
-   *  parseMode enables Telegram text formatting (e.g. "Markdown" for tap-to-copy `code` blocks). */
+   *  parseMode enables Telegram text formatting (e.g. "Markdown" for tap-to-copy `code` blocks).
+   *  selfDestructMs (if set) schedules a deleteMessage call after the given delay — used
+   *  for sensitive content like the TOTP enrollment QR/secret that should not linger in
+   *  chat history. In-memory timer only; lost on bot restart. */
   async reply(
     chatId: number,
     text: string,
-    extras?: { keyboard?: InlineKeyboardMarkup; photoBase64?: string; parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML' },
+    extras?: {
+      keyboard?: InlineKeyboardMarkup;
+      photoBase64?: string;
+      parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML';
+      selfDestructMs?: number;
+    },
   ): Promise<void> {
     const keyboard = extras?.keyboard;
     const photoBase64 = extras?.photoBase64;
     const parseMode = extras?.parseMode;
+    const selfDestructMs = extras?.selfDestructMs;
     try {
+      let res: Response;
       if (photoBase64) {
         const form = new FormData();
         form.append('chat_id', String(chatId));
@@ -194,7 +204,7 @@ export class TelegramCommander {
         const bytes = Buffer.from(photoBase64, 'base64');
         form.append('photo', new Blob([bytes]), 'qr.png');
         if (keyboard) form.append('reply_markup', JSON.stringify(keyboard));
-        const res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendPhoto`, {
+        res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendPhoto`, {
           method: 'POST',
           body: form,
         });
@@ -203,15 +213,46 @@ export class TelegramCommander {
         const body: Record<string, unknown> = { chat_id: chatId, text };
         if (keyboard) body.reply_markup = keyboard;
         if (parseMode) body.parse_mode = parseMode;
-        const res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+        res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
         if (!res.ok) logger.warn({ status: res.status, endpoint: 'sendMessage' }, 'telegram reply non-2xx');
       }
+      if (selfDestructMs && res.ok) {
+        try {
+          const data = (await res.json()) as { ok: boolean; result?: { message_id: number } };
+          const messageId = data.result?.message_id;
+          if (typeof messageId === 'number') {
+            const timer = setTimeout(() => {
+              void this.deleteMessage(chatId, messageId);
+            }, selfDestructMs);
+            // Don't hold the Node event loop open just because of a pending delete.
+            timer.unref?.();
+          }
+        } catch (e) {
+          logger.warn({ err: e }, 'telegram selfDestruct: could not parse message_id');
+        }
+      }
     } catch (e) {
       logger.warn({ err: e }, 'telegram commander reply failed');
+    }
+  }
+
+  /** Delete a message the bot has previously sent. Silent on failure. */
+  async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${this.botToken}/deleteMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+      });
+      if (!res.ok) {
+        logger.warn({ status: res.status, chatId, messageId }, 'deleteMessage non-2xx');
+      }
+    } catch (e) {
+      logger.warn({ err: e, chatId, messageId }, 'deleteMessage failed');
     }
   }
 

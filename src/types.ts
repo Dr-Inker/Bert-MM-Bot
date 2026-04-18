@@ -101,4 +101,25 @@ export interface VaultConfig {
   depositMinConfirms: number;        // 1 = first confirmation
   whitelistCooldownHours: number;    // 24 in spec
   operatorTelegramId: number;        // chat_id of the operator
+  uiButtons: boolean;                // emit inline keyboards on bot replies
+}
+
+// ─── Telegram inline-button types (mirror of Telegram Bot API shapes) ────
+export interface InlineKeyboardButton {
+  text: string;
+  callback_data: string;
+}
+
+export type InlineKeyboardMarkup = {
+  inline_keyboard: InlineKeyboardButton[][];
+};
+
+export interface CallbackQuery {
+  id: string;
+  from: { id: number };
+  message?: {
+    message_id: number;
+    chat: { id: number };
+  };
+  data?: string;
 }

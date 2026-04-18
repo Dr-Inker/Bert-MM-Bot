@@ -6,6 +6,34 @@ import { join } from 'node:path';
 const VALID_PATH = join(__dirname, 'fixtures', 'valid-config.yaml');
 const validYaml = readFileSync(VALID_PATH, 'utf8');
 
+interface BaseYamlOpts {
+  uiButtons?: boolean;
+  uiButtonsOmit?: boolean;
+}
+
+/** Append a `vault:` block to the base valid YAML, optionally toggling uiButtons. */
+function baseYamlWithVault(opts: BaseYamlOpts = {}): string {
+  const { uiButtons, uiButtonsOmit } = opts;
+  const vaultLines = [
+    'vault:',
+    '  enabled: true',
+    '  withdrawalFeeBps: 30',
+    '  minDepositUsd: 10',
+    '  minWithdrawalUsd: 5',
+    '  maxDailyWithdrawalsPerUser: 3',
+    '  maxDailyWithdrawalUsdPerUser: 5000',
+    '  maxPendingWithdrawals: 50',
+    '  depositMinConfirms: 1',
+    '  whitelistCooldownHours: 24',
+    '  operatorTelegramId: 12345',
+  ];
+  if (!uiButtonsOmit) {
+    const value = uiButtons === undefined ? true : uiButtons;
+    vaultLines.push(`  uiButtons: ${value}`);
+  }
+  return `${validYaml}\n${vaultLines.join('\n')}\n`;
+}
+
 describe('config loader', () => {
   it('parses a valid config', () => {
     const cfg = loadConfig(validYaml);
@@ -42,5 +70,18 @@ describe('config loader', () => {
   it('requires hardPauseSolBalance < minSolBalance', () => {
     const bad = validYaml.replace('hardPauseSolBalance: 0.03', 'hardPauseSolBalance: 0.5');
     expect(() => loadConfig(bad)).toThrow(ConfigError);
+  });
+});
+
+describe('vault.uiButtons flag', () => {
+  it('defaults to true when vault present but flag omitted', () => {
+    const yaml = baseYamlWithVault({ uiButtonsOmit: true });
+    const cfg = loadConfig(yaml);
+    expect(cfg.vault?.uiButtons).toBe(true);
+  });
+  it('honors explicit false', () => {
+    const yaml = baseYamlWithVault({ uiButtons: false });
+    const cfg = loadConfig(yaml);
+    expect(cfg.vault?.uiButtons).toBe(false);
   });
 });

@@ -54,6 +54,7 @@ const VaultConfigSchema = z.object({
   depositMinConfirms: z.number().int().nonnegative(),
   whitelistCooldownHours: z.number().int().positive(),
   operatorTelegramId: z.number().int(),
+  uiButtons: z.boolean().default(true),
 });
 
 export const BotConfigSchema = z

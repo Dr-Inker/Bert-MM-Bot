@@ -803,3 +803,45 @@ describe('CommandHandlers — TOTP rate limiting', () => {
     expect(auditRows.some((r) => r.event === 'totp_rate_limited')).toBe(false);
   });
 });
+
+describe('CommandHandlers — withdraw_amount_entry', () => {
+  it('reply with a valid USD number transitions pending to { withdraw, amountUsd } and prompts TOTP', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      // simulate the button-tap side effect: mark pending as amount-entry
+      h.handlers['pending'].set(7, { kind: 'withdraw_amount_entry' } as any);
+      // user must have a whitelist for withdraw to progress
+      h.store.setWhitelistImmediate({ telegramId: 7, address: 'ABC'.repeat(15), ts: 1 });
+      h.navProvider.totalUsd = 100;
+      h.navProvider.totalShares = 50;
+      h.store.addShares(7, 25);
+
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '25' });
+
+      const p = h.handlers.pendingFor(7);
+      expect(p?.kind).toBe('withdraw');
+      expect((p as any).amountUsd).toBeCloseTo(25, 2);
+      const lastText = h.reply.mock.calls[h.reply.mock.calls.length - 1][1];
+      expect(lastText).toMatch(/6-digit code/i);
+    } finally {
+      h.state.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reply with non-number clears pending and emits "invalid amount"', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      h.handlers['pending'].set(7, { kind: 'withdraw_amount_entry' } as any);
+      await h.handlers.handleMessage({ chatId: 5, userId: 7, text: 'banana' });
+      expect(h.handlers.pendingFor(7)).toBeUndefined();
+      const lastText = h.reply.mock.calls[h.reply.mock.calls.length - 1][1];
+      expect(lastText).toMatch(/invalid/i);
+    } finally {
+      h.state.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+});

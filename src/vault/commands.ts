@@ -55,6 +55,7 @@ export type PendingAction =
   | { kind: 'totp_setup_confirm' }
   | { kind: 'deposit_reveal' }
   | { kind: 'balance_reveal' }
+  | { kind: 'withdraw_amount_entry' }              // NEW: awaiting free-text USD amount
   | { kind: 'withdraw'; amountUsd: number }
   | { kind: 'setwhitelist_first'; address: string }
   | { kind: 'setwhitelist_change'; address: string }
@@ -270,6 +271,9 @@ export class CommandHandlers {
         return;
       case 'cancelwhitelist':
         await this.respondCancelWhitelist(msg);
+        return;
+      case 'withdraw_amount_entry':
+        await this.respondWithdrawAmountEntry(msg);
         return;
       case 'withdraw':
         await this.respondWithdraw(msg, pending);
@@ -527,6 +531,43 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Reply with your 2FA code to queue a $${amountUsd.toFixed(2)} withdrawal to ${user.whitelistAddress}.`,
+    );
+  }
+
+  private async respondWithdrawAmountEntry(
+    msg: { chatId: number; userId: number; text: string },
+  ): Promise<void> {
+    this.pending.delete(msg.userId);
+    const n = Number(msg.text.trim());
+    if (!Number.isFinite(n) || n <= 0) {
+      await this.deps.reply(msg.chatId, 'Invalid amount. Start again via /withdraw.');
+      return;
+    }
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user?.whitelistAddress) {
+      await this.deps.reply(msg.chatId, 'Set a withdrawal destination first via /setwhitelist.');
+      return;
+    }
+    const nav = await this.deps.getNav();
+    if (!nav) {
+      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      return;
+    }
+    const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
+    const shares = this.deps.store.getShares(msg.userId);
+    const userUsd = usdForShares({ netShares: shares, navPerShare });
+    if (n < this.deps.config.minWithdrawalUsd) {
+      await this.deps.reply(msg.chatId, `Amount below minimum ($${this.deps.config.minWithdrawalUsd.toFixed(2)}).`);
+      return;
+    }
+    if (n > userUsd + 1e-6) {
+      await this.deps.reply(msg.chatId, `Amount exceeds your balance ($${userUsd.toFixed(2)}).`);
+      return;
+    }
+    this.pending.set(msg.userId, { kind: 'withdraw', amountUsd: n });
+    await this.deps.reply(
+      msg.chatId,
+      `Withdraw $${n.toFixed(2)} to ${user.whitelistAddress.slice(0, 6)}…${user.whitelistAddress.slice(-4)}?\nReply with your 6-digit code to confirm.`,
     );
   }
 

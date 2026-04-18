@@ -256,7 +256,8 @@ export class CommandHandlers {
     }
     await this.deps.reply(
       msg.chatId,
-      '✅ Account ready.\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+      '\u00A0'.repeat(28) + '✅ Account ready' +
+        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
       this.kb(mainMenuKeyboard()),
     );
   }
@@ -398,7 +399,8 @@ export class CommandHandlers {
       this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
       await this.deps.reply(
         msg.chatId,
-        '✅ Account ready.\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+        '\u00A0'.repeat(28) + '✅ Account ready' +
+        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
         this.kb(mainMenuKeyboard()),
       );
       return;
@@ -587,7 +589,12 @@ export class CommandHandlers {
     }
     await this.deps.reply(
       msg.chatId,
-      '🏦 BertMM Vault\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+      // Telegram doesn't support text alignment; the subtitle below sets
+      // the bubble width, and leading non-breaking spaces push the title
+      // toward visual centre relative to the subtitle. (NBSP survives
+      // the trim some clients apply to regular spaces.)
+      '\u00A0'.repeat(28) + '🏦 BertMM Vault' +
+        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
       this.kb(mainMenuKeyboard()),
     );
   }

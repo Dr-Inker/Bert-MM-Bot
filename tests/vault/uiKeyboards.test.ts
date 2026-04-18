@@ -25,27 +25,23 @@ describe('uiKeyboards — core', () => {
     expect(kb.inline_keyboard[0][0].text).toMatch(/Create account/i);
   });
 
-  it('mainMenuKeyboard has 6 single-button rows (full-width for centered look)', () => {
+  it('mainMenuKeyboard has 3 rows of 2 buttons (even 50/50 split)', () => {
     const kb = mainMenuKeyboard();
-    expect(kb.inline_keyboard.length).toBe(6);
-    for (const row of kb.inline_keyboard) expect(row.length).toBe(1);
+    expect(kb.inline_keyboard.length).toBe(3);
+    for (const row of kb.inline_keyboard) expect(row.length).toBe(2);
     const flat = kb.inline_keyboard.flat().map(b => b.callback_data);
     expect(flat).toEqual([
-      'act:deposit',
-      'act:balance',
-      'act:withdraw',
-      'wl:set',
-      'nav:settings',
-      'act:stats',
+      'act:deposit',  'act:balance',
+      'act:withdraw', 'wl:set',
+      'nav:settings', 'act:stats',
     ]);
-    // Each label is padded to a fixed visual width (~30 cells) with
-    // regular spaces so narrow clients render a consistently-wide button.
+    // Each half-row label is padded so it reads as centred on clients
+    // that left-align button text.
     for (const row of kb.inline_keyboard) {
-      expect(row[0].text.startsWith(' ')).toBe(true);
-      expect(row[0].text.endsWith(' ')).toBe(true);
-      // At least 20 chars of padding combined (loose lower bound).
-      const padLen = row[0].text.length - row[0].text.trim().length;
-      expect(padLen).toBeGreaterThanOrEqual(15);
+      for (const btn of row) {
+        expect(btn.text.startsWith(' ')).toBe(true);
+        expect(btn.text.endsWith(' ')).toBe(true);
+      }
     }
   });
 

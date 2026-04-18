@@ -14,15 +14,13 @@ export function welcomeKeyboard(): InlineKeyboardMarkup {
 }
 
 export function mainMenuKeyboard(): InlineKeyboardMarkup {
-  // Pad each single-button-row label to a fixed ~30-char visible width
-  // with regular spaces, centred around the real label. Some Telegram
-  // clients size inline buttons to the text width and left-align them
-  // in the row; a heavily-padded fixed-width label forces a consistent
-  // wide button that visually centres the text regardless of client
-  // rendering rules.
-  const TARGET = 30;
+  // 2 buttons per row. Telegram enforces a 50/50 split on 2-button rows,
+  // so each button fills exactly half the chat bubble width regardless
+  // of client-side button-sizing rules. Labels are centred in each half
+  // with regular spaces for a balanced look on clients that left-align
+  // button text.
+  const TARGET = 14;   // visual cells per half-row label
   const center = (s: string): string => {
-    // Count emoji as 2 visual cells (close enough for our labels).
     const visual = [...s].reduce((n, ch) => n + (ch.codePointAt(0)! > 0xffff ? 2 : 1), 0);
     const pad = Math.max(0, TARGET - visual);
     const left = Math.floor(pad / 2);
@@ -31,12 +29,18 @@ export function mainMenuKeyboard(): InlineKeyboardMarkup {
   };
   return {
     inline_keyboard: [
-      [{ text: center('💰 Deposit'),   callback_data: 'act:deposit' }],
-      [{ text: center('📊 Balance'),   callback_data: 'act:balance' }],
-      [{ text: center('💸 Withdraw'),  callback_data: 'act:withdraw' }],
-      [{ text: center('🎯 Whitelist'), callback_data: 'wl:set' }],
-      [{ text: center('⚙️ Settings'),  callback_data: 'nav:settings' }],
-      [{ text: center('📈 Stats'),     callback_data: 'act:stats' }],
+      [
+        { text: center('💰 Deposit'),   callback_data: 'act:deposit' },
+        { text: center('📊 Balance'),   callback_data: 'act:balance' },
+      ],
+      [
+        { text: center('💸 Withdraw'),  callback_data: 'act:withdraw' },
+        { text: center('🎯 Whitelist'), callback_data: 'wl:set' },
+      ],
+      [
+        { text: center('⚙️ Settings'),  callback_data: 'nav:settings' },
+        { text: center('📈 Stats'),     callback_data: 'act:stats' },
+      ],
     ],
   };
 }

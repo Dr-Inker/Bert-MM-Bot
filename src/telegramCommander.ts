@@ -17,6 +17,21 @@ export interface IncomingMessage {
 
 export type CommandHandler = (msg: IncomingMessage) => Promise<void>;
 
+/**
+ * Parsed inline-keyboard callback handed to a callback router. The router
+ * (registered via {@link TelegramCommander.setCallbackRouter}) decides what
+ * to do with the `data` payload. The commander unconditionally calls
+ * `answerCallbackQuery` afterwards to dismiss the loading spinner.
+ */
+export interface ParsedCallback {
+  id: string;
+  userId: number;
+  chatId: number;
+  data: string;
+}
+
+export type CallbackRouter = (q: ParsedCallback) => Promise<void>;
+
 type Kind = 'operator' | 'vault' | 'public' | 'enrollment';
 
 export interface TelegramCommanderDeps {
@@ -53,6 +68,7 @@ export class TelegramCommander {
   private readonly depositorStore: DepositorStore;
   private handlers = new Map<string, { kind: Kind; fn: CommandHandler }>();
   private fallback: CommandHandler | null = null;
+  private callbackRouter: CallbackRouter | null = null;
 
   constructor(deps: TelegramCommanderDeps) {
     this.botToken = deps.botToken;
@@ -84,6 +100,15 @@ export class TelegramCommander {
    */
   registerFallback(fn: CommandHandler): void {
     this.fallback = fn;
+  }
+
+  /**
+   * Register the callback-query router. Once set, the commander widens its
+   * `allowed_updates` long-poll filter to include `callback_query` updates,
+   * and `dispatchCallback` invokes this function for every inline-button tap.
+   */
+  setCallbackRouter(fn: CallbackRouter): void {
+    this.callbackRouter = fn;
   }
 
   /**
@@ -203,10 +228,48 @@ export class TelegramCommander {
     }
   }
 
+  /** Parse a raw `callback_query` update, route to the registered router (if
+   *  any), and unconditionally call answerCallbackQuery in a finally block so
+   *  the loading spinner is always dismissed — even if the router throws or
+   *  no router is registered. */
+  async dispatchCallback(cb: {
+    id: string;
+    from: { id: number };
+    message?: { message_id: number; chat: { id: number } };
+    data?: string;
+  }): Promise<void> {
+    try {
+      if (!cb.message || !cb.data) {
+        return;
+      }
+      const parsed: ParsedCallback = {
+        id: cb.id,
+        userId: cb.from.id,
+        chatId: cb.message.chat.id,
+        data: cb.data,
+      };
+      if (this.callbackRouter) {
+        await this.callbackRouter(parsed);
+      } else {
+        logger.warn({ data: cb.data, userId: cb.from.id }, 'callback_query received but no router registered');
+      }
+    } catch (e) {
+      logger.error({ err: e }, 'dispatchCallback failed');
+    } finally {
+      await this.answerCallbackQuery(cb.id);
+    }
+  }
+
   private async pollLoop(): Promise<void> {
     while (this.running) {
       try {
-        const url = `https://api.telegram.org/bot${this.botToken}/getUpdates?offset=${this.offset}&timeout=${POLL_TIMEOUT_S}&allowed_updates=["message"]`;
+        // URL-encoded JSON arrays for the Telegram getUpdates allowed_updates filter.
+        // Widen to include callback_query only when a router is registered, so vanilla
+        // command-only deployments don't have to pull updates they don't consume.
+        const allowed = this.callbackRouter
+          ? '%5B%22message%22%2C%22callback_query%22%5D' // ["message","callback_query"]
+          : '%5B%22message%22%5D';                       // ["message"]
+        const url = `https://api.telegram.org/bot${this.botToken}/getUpdates?offset=${this.offset}&timeout=${POLL_TIMEOUT_S}&allowed_updates=${allowed}`;
         const res = await fetch(url, { signal: AbortSignal.timeout((POLL_TIMEOUT_S + 5) * 1000) });
         if (!res.ok) {
           logger.warn({ status: res.status }, 'telegram getUpdates non-2xx');
@@ -224,6 +287,12 @@ export class TelegramCommander {
               from?: { id: number };
               text?: string;
             };
+            callback_query?: {
+              id: string;
+              from: { id: number };
+              message?: { message_id: number; chat: { id: number } };
+              data?: string;
+            };
           }>;
         };
 
@@ -234,6 +303,10 @@ export class TelegramCommander {
 
         for (const update of data.result) {
           this.offset = update.update_id + 1;
+          if (update.callback_query) {
+            await this.dispatchCallback(update.callback_query);
+            continue;
+          }
           const msg = update.message;
           if (!msg?.text) continue;
 
@@ -247,6 +320,12 @@ export class TelegramCommander {
             messageId: msg.message_id,
           });
         }
+
+        // Yield to the macrotask queue so timers (notably this.stop() callers
+        // in tests) can fire between iterations. In production this is a
+        // no-op pause: the long-poll fetch above is the natural macrotask
+        // boundary. Only matters when fetch resolves synchronously (mocks).
+        await new Promise<void>((r) => setImmediate(r));
       } catch (e) {
         logger.warn({ err: e }, 'telegram commander poll error');
         await sleep(POLL_INTERVAL_MS);

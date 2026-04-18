@@ -178,3 +178,74 @@ describe('TelegramCommander.answerCallbackQuery', () => {
     await expect(tg.answerCallbackQuery('x')).resolves.toBeUndefined();
   });
 });
+
+describe('TelegramCommander.dispatchCallback', () => {
+  it('calls registered callback router with parsed query, then answers', async () => {
+    const answers: string[] = [];
+    const fetchMock = vi.fn(async (url: string, init: any) => {
+      if (url.endsWith('/answerCallbackQuery')) {
+        answers.push(JSON.parse(init.body).callback_query_id);
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    const seen: any[] = [];
+    tg.setCallbackRouter(async (q) => { seen.push(q); });
+    await tg.dispatchCallback({
+      id: 'q1',
+      from: { id: 7 },
+      message: { message_id: 10, chat: { id: 42 } },
+      data: 'nav:home',
+    });
+    expect(seen).toEqual([{ id: 'q1', userId: 7, chatId: 42, data: 'nav:home' }]);
+    expect(answers).toEqual(['q1']);
+  });
+
+  it('unknown data still answers the query but logs at warn', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    // no router registered → dispatchCallback should still call answerCallbackQuery
+    await tg.dispatchCallback({
+      id: 'q2', from: { id: 7 }, message: { message_id: 1, chat: { id: 42 } }, data: 'xxx',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/answerCallbackQuery$/),
+      expect.anything(),
+    );
+  });
+});
+
+describe('TelegramCommander — allowed_updates widening', () => {
+  it('includes callback_query in getUpdates URL when setCallbackRouter has been called', async () => {
+    const captured: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      captured.push(url);
+      return { ok: true, json: async () => ({ ok: true, result: [] }) };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    tg.setCallbackRouter(async () => {});
+    tg.start();
+    // give the poll loop one tick
+    await new Promise((r) => setTimeout(r, 50));
+    tg.stop();
+    expect(captured[0]).toMatch(/allowed_updates=%5B%22message%22%2C%22callback_query%22%5D/);
+  });
+
+  it('only ["message"] when no callback router registered', async () => {
+    const captured: string[] = [];
+    const fetchMock = vi.fn(async (url: string) => {
+      captured.push(url);
+      return { ok: true, json: async () => ({ ok: true, result: [] }) };
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    tg.start();
+    await new Promise((r) => setTimeout(r, 50));
+    tg.stop();
+    expect(captured[0]).toMatch(/allowed_updates=%5B%22message%22%5D/);
+    expect(captured[0]).not.toMatch(/callback_query/);
+  });
+});

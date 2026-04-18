@@ -23,7 +23,15 @@ import { PublicKey } from '@solana/web3.js';
 import QRCode from 'qrcode';
 
 export interface ReplyFn {
-  (chatId: number, text: string, extras?: { photoBase64?: string; keyboard?: InlineKeyboardMarkup }): Promise<void>;
+  (
+    chatId: number,
+    text: string,
+    extras?: {
+      photoBase64?: string;
+      keyboard?: InlineKeyboardMarkup;
+      parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML';
+    },
+  ): Promise<void>;
 }
 
 export interface CommandsConfig {
@@ -88,9 +96,17 @@ export type PendingAction =
  *  stuck session and (very lightly) raises the cost of brute-forcing. */
 const TOTP_SETUP_MAX_FAILURES = 5;
 
+/** After a successful TOTP verification, subsequent privileged commands from
+ *  the same user are fast-tracked (no TOTP prompt) for this many ms. Per-user,
+ *  in-memory, cleared on bot restart. Whitelist cooldown still applies — an
+ *  attacker with a hijacked Telegram session for 5 min can still only withdraw
+ *  to the pre-set whitelist address. */
+const TOTP_UNLOCK_MS = 5 * 60 * 1000;
+
 export class CommandHandlers {
   private pending = new Map<number, PendingAction>();
   private totpSetupFailures = new Map<number, number>();
+  private unlockedUntil = new Map<number, number>();
   private audit: AuditLog;
   private rateLimiter: TotpRateLimiter;
 
@@ -149,6 +165,7 @@ export class CommandHandlers {
     const v = this.verifyTotp(userId, code);
     if (v.ok) {
       this.rateLimiter.recordSuccess(userId);
+      this.setUnlocked(userId);
       return { ok: true };
     }
     const r = this.rateLimiter.recordFailure(userId, now);
@@ -173,6 +190,22 @@ export class CommandHandlers {
   /** Test accessor — returns what (if any) action is awaiting TOTP for this user. */
   pendingFor(userId: number): PendingAction | undefined {
     return this.pending.get(userId);
+  }
+
+  /** True if the user's TOTP is currently "unlocked" (successful verify within the last TOTP_UNLOCK_MS). */
+  private isUnlocked(userId: number): boolean {
+    const until = this.unlockedUntil.get(userId);
+    return until !== undefined && until > this.deps.nowMs();
+  }
+
+  /** Mark the user as unlocked for TOTP_UNLOCK_MS. Called from verifyTotpGated on success. */
+  private setUnlocked(userId: number): void {
+    this.unlockedUntil.set(userId, this.deps.nowMs() + TOTP_UNLOCK_MS);
+  }
+
+  /** Clear the unlock for a user (used by explicit lock command, future). */
+  clearUnlock(userId: number): void {
+    this.unlockedUntil.delete(userId);
   }
 
   /** Set a pending action for the user. Used by uiCallbacks (e.g. wd:custom). */
@@ -215,8 +248,8 @@ export class CommandHandlers {
       const photoBase64 = dataUrl.replace(/^data:image\/png;base64,/, '');
       await this.deps.reply(
         msg.chatId,
-        `🔐 Scan this QR in Google Auth or Authy.\nOr enter secret manually: ${secretBase32}\n\nReply with the 6-digit code.`,
-        { photoBase64, ...this.kb(cancelKeyboard()) },
+        `🔐 Scan this QR in Google Auth or Authy.\n\nOr enter the secret manually (tap to copy):\n\`${secretBase32}\`\n\nReply with the 6-digit code.`,
+        { photoBase64, parseMode: 'Markdown', ...this.kb(cancelKeyboard()) },
       );
       return;
     }
@@ -274,6 +307,10 @@ export class CommandHandlers {
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
+    if (this.isUnlocked(msg.userId)) {
+      await this._doDepositReveal(msg.userId, msg.chatId);
+      return;
+    }
     this.pending.set(msg.userId, { kind: 'deposit_reveal' });
     await this.deps.reply(
       msg.chatId,
@@ -433,6 +470,10 @@ export class CommandHandlers {
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
+    if (this.isUnlocked(msg.userId)) {
+      await this._doBalanceReveal(msg.userId, msg.chatId);
+      return;
+    }
     this.pending.set(msg.userId, { kind: 'balance_reveal' });
     await this.deps.reply(
       msg.chatId,
@@ -461,11 +502,16 @@ export class CommandHandlers {
       );
       return;
     }
-    const shares = this.deps.store.getShares(msg.userId);
+    await this._doBalanceReveal(msg.userId, msg.chatId);
+  }
+
+  /** Post-verify (or unlocked-shortcut) work: fetch shares + NAV, audit, reply. */
+  private async _doBalanceReveal(userId: number, chatId: number): Promise<void> {
+    const shares = this.deps.store.getShares(userId);
     const nav = await this.deps.getNav();
     if (!nav) {
       await this.deps.reply(
-        msg.chatId,
+        chatId,
         'NAV unavailable — try again shortly.',
         this.kb(errorKeyboard({ retryCallback: 'act:balance' })),
       );
@@ -474,11 +520,11 @@ export class CommandHandlers {
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     const usd = usdForShares({ netShares: shares, navPerShare });
     this.audit.write({
-      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'balance_reveal',
+      ts: this.deps.nowMs(), telegramId: userId, event: 'balance_reveal',
       details: { shares, navPerShare, usd },
     });
     await this.deps.reply(
-      msg.chatId,
+      chatId,
       `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
       this.kb(postBalanceKeyboard()),
     );
@@ -645,6 +691,10 @@ export class CommandHandlers {
       return;
     }
 
+    if (this.isUnlocked(msg.userId)) {
+      await this._doWithdraw(msg.userId, msg.chatId, amountUsd);
+      return;
+    }
     this.pending.set(msg.userId, { kind: 'withdraw', amountUsd });
     await this.deps.reply(
       msg.chatId,
@@ -703,6 +753,10 @@ export class CommandHandlers {
       );
       return;
     }
+    if (this.isUnlocked(msg.userId)) {
+      await this._doWithdraw(msg.userId, msg.chatId, n);
+      return;
+    }
     this.pending.set(msg.userId, { kind: 'withdraw', amountUsd: n });
     await this.deps.reply(
       msg.chatId,
@@ -734,10 +788,15 @@ export class CommandHandlers {
       );
       return;
     }
-    const user = this.deps.store.getUser(msg.userId)!;
+    await this._doWithdraw(msg.userId, msg.chatId, pending.amountUsd);
+  }
+
+  /** Post-verify (or unlocked-shortcut) work: enqueue withdrawal. */
+  private async _doWithdraw(userId: number, chatId: number, amountUsd: number): Promise<void> {
+    const user = this.deps.store.getUser(userId)!;
     if (!user.whitelistAddress) {
       await this.deps.reply(
-        msg.chatId,
+        chatId,
         'No whitelist address set.',
         this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
@@ -746,7 +805,7 @@ export class CommandHandlers {
     const nav = await this.deps.getNav();
     if (!nav) {
       await this.deps.reply(
-        msg.chatId,
+        chatId,
         'NAV unavailable — try again shortly.',
         this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
@@ -755,28 +814,28 @@ export class CommandHandlers {
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     if (navPerShare <= 0) {
       await this.deps.reply(
-        msg.chatId,
+        chatId,
         'NAV unavailable — try again shortly.',
         this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
-    const sharesBurned = pending.amountUsd / navPerShare;
+    const sharesBurned = amountUsd / navPerShare;
     const { feeShares } = splitFee({ sharesBurned, feeBps: this.deps.config.withdrawalFeeBps });
     const id = this.deps.store.enqueueWithdrawal({
-      telegramId: msg.userId,
+      telegramId: userId,
       destination: user.whitelistAddress,
       sharesBurned,
       feeShares,
       queuedAt: this.deps.nowMs(),
     });
     this.audit.write({
-      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'withdrawal_queued',
-      details: { id, amountUsd: pending.amountUsd, sharesBurned, feeShares, destination: user.whitelistAddress },
+      ts: this.deps.nowMs(), telegramId: userId, event: 'withdrawal_queued',
+      details: { id, amountUsd, sharesBurned, feeShares, destination: user.whitelistAddress },
     });
     await this.deps.reply(
-      msg.chatId,
-      `Queued! Your withdrawal of $${pending.amountUsd.toFixed(2)} will be processed on the next tick.`,
+      chatId,
+      `Queued! Your withdrawal of $${amountUsd.toFixed(2)} will be processed on the next tick.`,
       this.kb(postActionKeyboard()),
     );
   }
@@ -814,6 +873,10 @@ export class CommandHandlers {
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
+    if (this.isUnlocked(msg.userId)) {
+      await this._doSetWhitelist(msg.userId, msg.chatId, addr);
+      return;
+    }
     if (user.whitelistAddress === null) {
       this.pending.set(msg.userId, { kind: 'setwhitelist_first', address: addr });
       await this.deps.reply(
@@ -845,6 +908,10 @@ export class CommandHandlers {
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
+    if (this.isUnlocked(msg.userId)) {
+      await this._doCancelWhitelist(msg.userId, msg.chatId);
+      return;
+    }
     this.pending.set(msg.userId, { kind: 'cancelwhitelist' });
     await this.deps.reply(
       msg.chatId,
@@ -907,23 +974,28 @@ export class CommandHandlers {
       );
       return;
     }
+    await this._doSetWhitelist(msg.userId, msg.chatId, pending.address);
+  }
+
+  /** Post-verify (or unlocked-shortcut) work: set/queue whitelist via Cooldowns. */
+  private async _doSetWhitelist(userId: number, chatId: number, address: string): Promise<void> {
     const result = this.deps.cooldowns.requestChange({
-      telegramId: msg.userId, newAddress: pending.address, now: this.deps.nowMs(),
+      telegramId: userId, newAddress: address, now: this.deps.nowMs(),
     });
     this.audit.write({
-      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'whitelist_set',
-      details: { address: pending.address, immediate: result.immediate, activatesAt: result.activatesAt },
+      ts: this.deps.nowMs(), telegramId: userId, event: 'whitelist_set',
+      details: { address, immediate: result.immediate, activatesAt: result.activatesAt },
     });
     if (result.immediate) {
       await this.deps.reply(
-        msg.chatId,
-        `Whitelist set to ${pending.address} (effective immediately).`,
+        chatId,
+        `Whitelist set to ${address} (effective immediately).`,
         this.kb(postActionKeyboard()),
       );
     } else {
       const activates = new Date(result.activatesAt).toISOString();
       await this.deps.reply(
-        msg.chatId,
+        chatId,
         `Whitelist change queued. Activates at ${activates}. Use /cancelwhitelist to abort before then.`,
         this.kb(postActionKeyboard()),
       );
@@ -952,15 +1024,20 @@ export class CommandHandlers {
       );
       return;
     }
+    await this._doCancelWhitelist(msg.userId, msg.chatId);
+  }
+
+  /** Post-verify (or unlocked-shortcut) work: cancel pending whitelist change. */
+  private async _doCancelWhitelist(userId: number, chatId: number): Promise<void> {
     const ok = this.deps.cooldowns.cancelPending({
-      telegramId: msg.userId, reason: 'user', now: this.deps.nowMs(),
+      telegramId: userId, reason: 'user', now: this.deps.nowMs(),
     });
     this.audit.write({
-      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'whitelist_cancel',
+      ts: this.deps.nowMs(), telegramId: userId, event: 'whitelist_cancel',
       details: { cancelled: ok },
     });
     await this.deps.reply(
-      msg.chatId,
+      chatId,
       ok ? 'Pending whitelist change cancelled.' : 'Nothing to cancel — no pending whitelist change.',
       this.kb(postActionKeyboard()),
     );
@@ -986,15 +1063,19 @@ export class CommandHandlers {
       );
       return;
     }
-    const user = this.deps.store.getUser(msg.userId)!;
+    await this._doDepositReveal(msg.userId, msg.chatId);
+  }
+
+  /** Post-verify (or unlocked-shortcut) work: fetch deposit address + audit + reply with Markdown code block. */
+  private async _doDepositReveal(userId: number, chatId: number): Promise<void> {
+    const user = this.deps.store.getUser(userId)!;
     this.audit.write({
-      ts: this.deps.nowMs(), telegramId: msg.userId, event: 'deposit_reveal',
+      ts: this.deps.nowMs(), telegramId: userId, event: 'deposit_reveal',
     });
     await this.deps.reply(
-      msg.chatId,
-      `Your deposit address (SOL + BERT):\n${user.depositAddress}\n\n` +
-        `Send SOL and/or BERT to this address. Funds will be swept + credited after the next tick.`,
-      this.kb(postDepositKeyboard()),
+      chatId,
+      `Your deposit address (SOL + BERT) — tap to copy:\n\`${user.depositAddress}\`\n\nSend SOL and/or BERT to this address. Funds will be swept + credited after the next tick.`,
+      { ...this.kb(postDepositKeyboard()), parseMode: 'Markdown' },
     );
   }
 }

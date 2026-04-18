@@ -175,19 +175,22 @@ export class TelegramCommander {
 
   /** Send a reply to the given chat. Public so handlers registered from main.ts can use it.
    *  Optionally attaches an inline keyboard (reply_markup) and/or sends as a photo caption.
-   *  When photoBase64 is provided, the Bot API endpoint switches from sendMessage to sendPhoto. */
+   *  When photoBase64 is provided, the Bot API endpoint switches from sendMessage to sendPhoto.
+   *  parseMode enables Telegram text formatting (e.g. "Markdown" for tap-to-copy `code` blocks). */
   async reply(
     chatId: number,
     text: string,
-    extras?: { keyboard?: InlineKeyboardMarkup; photoBase64?: string },
+    extras?: { keyboard?: InlineKeyboardMarkup; photoBase64?: string; parseMode?: 'Markdown' | 'MarkdownV2' | 'HTML' },
   ): Promise<void> {
     const keyboard = extras?.keyboard;
     const photoBase64 = extras?.photoBase64;
+    const parseMode = extras?.parseMode;
     try {
       if (photoBase64) {
         const form = new FormData();
         form.append('chat_id', String(chatId));
         form.append('caption', text);
+        if (parseMode) form.append('parse_mode', parseMode);
         const bytes = Buffer.from(photoBase64, 'base64');
         form.append('photo', new Blob([bytes]), 'qr.png');
         if (keyboard) form.append('reply_markup', JSON.stringify(keyboard));
@@ -199,6 +202,7 @@ export class TelegramCommander {
       } else {
         const body: Record<string, unknown> = { chat_id: chatId, text };
         if (keyboard) body.reply_markup = keyboard;
+        if (parseMode) body.parse_mode = parseMode;
         const res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

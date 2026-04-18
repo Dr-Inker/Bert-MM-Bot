@@ -807,6 +807,10 @@ describe('CommandHandlers — TOTP rate limiting', () => {
     // Depicts a successful reveal, not a lockout.
     expect(h.reply.mock.calls.at(-1)?.[1]).not.toMatch(/locked/i);
 
+    // Advance past the 5-min TOTP-unlock window so the next handleDeposit
+    // goes through the TOTP prompt path instead of the unlocked shortcut.
+    h.nowRef.current += 5 * 60_000 + 1_000;
+
     // Now one more bad code should NOT trip the lockout — the counter was cleared.
     await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
     await h.handlers.handleMessage({ chatId: 5, userId: 7, text: '000000' });

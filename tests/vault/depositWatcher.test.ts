@@ -12,8 +12,8 @@ describe('DepositWatcher', () => {
       meta: {
         preBalances: [0, 0],
         postBalances: [solDelta, 0],
-        preTokenBalances: [{ owner: TEST_ADDR, mint: 'bertmint', uiTokenAmount: { amount: '0', decimals: 6 } }],
-        postTokenBalances: [{ owner: TEST_ADDR, mint: 'bertmint', uiTokenAmount: { amount: String(bertDelta), decimals: 6 } }],
+        preTokenBalances: [{ owner: TEST_ADDR, mint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump', uiTokenAmount: { amount: '0', decimals: 6 } }],
+        postTokenBalances: [{ owner: TEST_ADDR, mint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump', uiTokenAmount: { amount: String(bertDelta), decimals: 6 } }],
       },
       transaction: { message: { accountKeys: [{ pubkey: TEST_ADDR, signer: false, writable: true }] } },
     }),
@@ -25,7 +25,7 @@ describe('DepositWatcher', () => {
     const conn = mockConnection(1_500_000_000, 0, 'sig1');
     const watcher = new DepositWatcher({
       connection: conn as any,
-      bertMint: 'bertmint',
+      bertMint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump',
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });
@@ -44,7 +44,7 @@ describe('DepositWatcher', () => {
     const conn = mockConnection(0, 250_000_000, 'sigB');
     const watcher = new DepositWatcher({
       connection: conn as any,
-      bertMint: 'bertmint',
+      bertMint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump',
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });
@@ -58,7 +58,7 @@ describe('DepositWatcher', () => {
     const conn = mockConnection(1_000_000, 0, 'sigC');
     const watcher = new DepositWatcher({
       connection: conn as any,
-      bertMint: 'bertmint',
+      bertMint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump',
       isAlreadyCredited: (sig) => sig === 'sigC',
       onInflow: async (e) => { events.push(e); },
     });
@@ -71,7 +71,7 @@ describe('DepositWatcher', () => {
     const conn = mockConnection(0, 0, 'sigD');
     const watcher = new DepositWatcher({
       connection: conn as any,
-      bertMint: 'bertmint',
+      bertMint: 'HgBRWfYxEfvPhtqkaeymCQtHCrKE46qQ43pKe8HCpump',
       isAlreadyCredited: () => false,
       onInflow: async (e) => { events.push(e); },
     });

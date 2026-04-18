@@ -1,4 +1,5 @@
 import { PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import type { Connection, ConfirmedSignatureInfo, ParsedTransactionWithMeta } from '@solana/web3.js';
 
 export interface InflowEvent {
@@ -19,11 +20,30 @@ export interface DepositWatcherDeps {
 export class DepositWatcher {
   constructor(private deps: DepositWatcherDeps) {}
 
-  /** Poll one deposit address for new inflows. Calls onInflow() for each. */
+  /** Poll one deposit address for new inflows. Calls onInflow() for each.
+   *  Scans BOTH the main pubkey (for SOL transfers) and the user's BERT ATA
+   *  (for SPL transfers — SPL txs don't touch the owner's main account, so
+   *  `getSignaturesForAddress(owner)` alone misses BERT inflows). */
   async pollAddress(address: string): Promise<void> {
-    const sigs: ConfirmedSignatureInfo[] = await this.deps.connection.getSignaturesForAddress(
-      new PublicKey(address), { limit: 10 }
-    );
+    const ownerPk = new PublicKey(address);
+    const bertMintPk = new PublicKey(this.deps.bertMint);
+    const bertAta = getAssociatedTokenAddressSync(bertMintPk, ownerPk, false);
+
+    const [sigsMain, sigsAta] = await Promise.all([
+      this.deps.connection.getSignaturesForAddress(ownerPk, { limit: 10 }),
+      this.deps.connection.getSignaturesForAddress(bertAta, { limit: 10 }),
+    ]);
+
+    // Merge + dedupe by signature; a single tx can appear on both lists
+    // (e.g. a deposit that sends SOL to the owner AND BERT to the ATA).
+    const seen = new Set<string>();
+    const sigs: ConfirmedSignatureInfo[] = [];
+    for (const s of [...sigsMain, ...sigsAta]) {
+      if (seen.has(s.signature)) continue;
+      seen.add(s.signature);
+      sigs.push(s);
+    }
+
     for (const s of sigs) {
       if (s.err !== null) continue;
       if (this.deps.isAlreadyCredited(s.signature)) continue;

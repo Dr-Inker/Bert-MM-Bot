@@ -35,12 +35,14 @@ describe('uiKeyboards — core', () => {
       'act:withdraw', 'wl:set',
       'nav:settings', 'act:stats',
     ]);
-    // Each half-row label is padded so it reads as centred on clients
-    // that left-align button text.
+    // Each half-row label is padded with non-breaking spaces so it
+    // reads as centred and wider on clients that left-align button
+    // text and/or trim regular whitespace.
+    const NBSP = '\u00A0';
     for (const row of kb.inline_keyboard) {
       for (const btn of row) {
-        expect(btn.text.startsWith(' ')).toBe(true);
-        expect(btn.text.endsWith(' ')).toBe(true);
+        expect(btn.text.startsWith(NBSP)).toBe(true);
+        expect(btn.text.endsWith(NBSP)).toBe(true);
       }
     }
   });

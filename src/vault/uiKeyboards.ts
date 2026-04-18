@@ -14,32 +14,38 @@ export function welcomeKeyboard(): InlineKeyboardMarkup {
 }
 
 export function mainMenuKeyboard(): InlineKeyboardMarkup {
-  // 2 buttons per row. Telegram enforces a 50/50 split on 2-button rows,
-  // so each button fills exactly half the chat bubble width regardless
-  // of client-side button-sizing rules. Labels are centred in each half
-  // with regular spaces for a balanced look on clients that left-align
-  // button text.
-  const TARGET = 14;   // visual cells per half-row label
-  const center = (s: string): string => {
+  // 2 buttons per row. Telegram normally enforces 50/50 width split on
+  // 2-button rows. Some clients (seen in testing) instead size each
+  // button to its label text — which left-aligns narrow buttons and
+  // makes them look tiny. To defend against that, pad each label to a
+  // fixed width using **non-breaking spaces (U+00A0)**: these render
+  // identical to regular spaces but are NOT whitespace per the strict
+  // definition used by some Telegram clients' label trimmers, so they
+  // survive the round trip and force a visibly wider button. Padding
+  // is symmetric so the real text sits in the middle of its half-row
+  // on left-aligning clients too.
+  const TARGET = 18;        // visual cells per button label
+  const NBSP = '\u00A0';
+  const pad = (s: string): string => {
     const visual = [...s].reduce((n, ch) => n + (ch.codePointAt(0)! > 0xffff ? 2 : 1), 0);
-    const pad = Math.max(0, TARGET - visual);
-    const left = Math.floor(pad / 2);
-    const right = pad - left;
-    return ' '.repeat(left) + s + ' '.repeat(right);
+    const n = Math.max(0, TARGET - visual);
+    const left = Math.floor(n / 2);
+    const right = n - left;
+    return NBSP.repeat(left) + s + NBSP.repeat(right);
   };
   return {
     inline_keyboard: [
       [
-        { text: center('💰 Deposit'),   callback_data: 'act:deposit' },
-        { text: center('📊 Balance'),   callback_data: 'act:balance' },
+        { text: pad('💰 Deposit'),   callback_data: 'act:deposit' },
+        { text: pad('📊 Balance'),   callback_data: 'act:balance' },
       ],
       [
-        { text: center('💸 Withdraw'),  callback_data: 'act:withdraw' },
-        { text: center('🎯 Whitelist'), callback_data: 'wl:set' },
+        { text: pad('💸 Withdraw'),  callback_data: 'act:withdraw' },
+        { text: pad('🎯 Whitelist'), callback_data: 'wl:set' },
       ],
       [
-        { text: center('⚙️ Settings'),  callback_data: 'nav:settings' },
-        { text: center('📈 Stats'),     callback_data: 'act:stats' },
+        { text: pad('⚙️ Settings'),  callback_data: 'nav:settings' },
+        { text: pad('📈 Stats'),     callback_data: 'act:stats' },
       ],
     ],
   };

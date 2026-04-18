@@ -104,6 +104,17 @@ main.ts (30s poll loop)
 - Hourly report includes: price, range, in-range %, rebalances today, bot status
 - Notifications are optional in config (bot runs silently without them)
 
+## Telegram depositor UI (`vault.uiButtons`)
+
+When `vault.uiButtons: true` (default), depositor flows present inline-keyboard
+buttons alongside the typed commands. Button taps fire `callback_query` events
+routed through `src/vault/uiCallbacks.ts` → `CommandHandlers` (same methods
+typed commands invoke; TOTP gating and rate limiter unchanged). The `/menu`
+command renders the main keyboard; typed commands still work.
+
+Set `vault.uiButtons: false` to disable buttons (commands still work, but no
+`callback_query` updates are polled and no `reply_markup` is attached).
+
 ## Audit findings (fixed)
 - **C1**: getPosition RPC failure no longer opens duplicate position (skips tick)
 - **C2**: Initial position open now checks kill switch + degraded flag

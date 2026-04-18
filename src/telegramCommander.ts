@@ -218,11 +218,12 @@ export class TelegramCommander {
     try {
       const body: Record<string, unknown> = { callback_query_id: queryId };
       if (text) body.text = text;
-      await fetch(`https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`, {
+      const res = await fetch(`https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (!res.ok) logger.warn({ status: res.status, queryId }, 'answerCallbackQuery non-2xx');
     } catch (e) {
       logger.warn({ err: e, queryId }, 'telegram answerCallbackQuery failed');
     }

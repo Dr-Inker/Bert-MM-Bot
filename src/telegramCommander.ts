@@ -166,18 +166,20 @@ export class TelegramCommander {
         const bytes = Buffer.from(photoBase64, 'base64');
         form.append('photo', new Blob([bytes]), 'qr.png');
         if (keyboard) form.append('reply_markup', JSON.stringify(keyboard));
-        await fetch(`https://api.telegram.org/bot${this.botToken}/sendPhoto`, {
+        const res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendPhoto`, {
           method: 'POST',
           body: form,
         });
+        if (!res.ok) logger.warn({ status: res.status, endpoint: 'sendPhoto' }, 'telegram reply non-2xx');
       } else {
         const body: Record<string, unknown> = { chat_id: chatId, text };
         if (keyboard) body.reply_markup = keyboard;
-        await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+        const res = await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
+        if (!res.ok) logger.warn({ status: res.status, endpoint: 'sendMessage' }, 'telegram reply non-2xx');
       }
     } catch (e) {
       logger.warn({ err: e }, 'telegram commander reply failed');

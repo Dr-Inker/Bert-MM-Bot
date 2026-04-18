@@ -138,6 +138,20 @@ describe('TelegramCommander.reply — extras', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body).toEqual({ chat_id: 42, text: 'hi' });
   });
+
+  it('sendPhoto branch includes reply_markup when both photo+keyboard provided', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    await tg.reply(42, 'cap', {
+      photoBase64: 'aGVsbG8=',
+      keyboard: { inline_keyboard: [[{ text: 'x', callback_data: 'cancel' }]] },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/sendPhoto$/);
+    const form = fetchMock.mock.calls[0][1].body as FormData;
+    expect(form.get('reply_markup')).toBe(JSON.stringify({ inline_keyboard: [[{ text: 'x', callback_data: 'cancel' }]] }));
+    expect(form.get('chat_id')).toBe('42');
+    expect(form.get('caption')).toBe('cap');
+  });
 });
 
 function fakeStore() { return { getUser: () => null } as any; }

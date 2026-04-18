@@ -257,7 +257,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       '\u00A0'.repeat(28) + '✅ Account ready' +
-        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+        '\n\nTap any action below.',
       this.kb(mainMenuKeyboard()),
     );
   }
@@ -400,7 +400,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         '\u00A0'.repeat(28) + '✅ Account ready' +
-        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+        '\n\nTap any action below.',
         this.kb(mainMenuKeyboard()),
       );
       return;
@@ -594,7 +594,7 @@ export class CommandHandlers {
       // toward visual centre relative to the subtitle. (NBSP survives
       // the trim some clients apply to regular spaces.)
       '\u00A0'.repeat(28) + '🏦 BertMM Vault' +
-        '\n\nTap an action below to deposit, check your balance, withdraw funds, or configure settings.',
+        '\n\nTap any action below.',
       this.kb(mainMenuKeyboard()),
     );
   }

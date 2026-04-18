@@ -448,7 +448,7 @@ async function main(): Promise<void> {
             enrollment,
             cooldowns,
             masterKey,
-            reply: (chatId, text) => tgCmd.reply(chatId, text),
+            reply: (chatId, text, extras) => tgCmd.reply(chatId, text, extras),
             config: {
               withdrawalFeeBps: cfg.vault.withdrawalFeeBps,
               minWithdrawalUsd: cfg.vault.minWithdrawalUsd,
@@ -482,7 +482,7 @@ async function main(): Promise<void> {
             store: depositorStoreLocal,
             state,
             audit: new AuditLog(depositorStoreLocal),
-            reply: (chatId, text) => tgCmd.reply(chatId, text),
+            reply: (chatId, text, extras) => tgCmd.reply(chatId, text, extras),
             nowMs: () => Date.now(),
             creditEngine,
             getMid: async () => {

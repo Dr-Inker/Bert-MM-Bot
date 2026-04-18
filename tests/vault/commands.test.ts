@@ -1033,3 +1033,74 @@ describe('CommandHandlers — withdraw/whitelist keyboards', () => {
     } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
   });
 });
+
+/**
+ * C1 regression: the wrapper lambda in main.ts used to be
+ *   reply: (chatId, text) => tgCmd.reply(chatId, text)
+ * which silently dropped the third `extras` argument. Every keyboard + the
+ * enrollment QR photo were stripped in production even though the direct
+ * vi.fn() mocks elsewhere in this file covered keyboards being attached.
+ *
+ * These tests wire a real TelegramCommander.reply (with fetch mocked) through
+ * both lambda shapes. The buggy 2-arg form drops reply_markup from the HTTP
+ * body; the correct 3-arg form (as main.ts now does) preserves it.
+ */
+describe('CommandHandlers — reply wiring regression (C1)', () => {
+  async function wireAndTap(lambdaMode: 'buggy-2arg' | 'fixed-3arg') {
+    const { TelegramCommander } = await import('../../src/telegramCommander.js');
+    const { CommandHandlers } = await import('../../src/vault/commands.js');
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, result: { message_id: 1 } }),
+    }));
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const h = buildHarness();
+    try {
+      const tgCmd = new TelegramCommander({
+        botToken: 'tok', operatorUserId: 1, depositorStore: h.store,
+      });
+      const reply = lambdaMode === 'fixed-3arg'
+        ? (chatId: number, text: string, extras?: any) => tgCmd.reply(chatId, text, extras)
+        // Mimics the original main.ts bug — silently drops extras.
+        : (chatId: number, text: string) => tgCmd.reply(chatId, text);
+      const wiredHandlers = new CommandHandlers({
+        store: h.store,
+        enrollment: h.enrollment,
+        cooldowns: h.cooldowns,
+        masterKey: MASTER_KEY,
+        reply,
+        config: makeConfig(),
+        getNav: async () => h.navProvider,
+        nowMs: () => h.nowRef.current,
+      });
+      await enrollFully(h, 7);
+      // handleMenu on an enrolled user emits the main-menu keyboard.
+      await wiredHandlers.handleMenu({ chatId: 5, userId: 7 });
+      const sendMsgCall = fetchMock.mock.calls.find((c: any) =>
+        typeof c[0] === 'string' && c[0].endsWith('/sendMessage'),
+      );
+      const body = sendMsgCall ? JSON.parse((sendMsgCall as any)[1].body as string) : null;
+      return { body };
+    } finally {
+      h.state.close();
+      rmSync(h.dir, { recursive: true, force: true });
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it('3-arg wrapper (fix): HTTP body includes reply_markup with main-menu buttons', async () => {
+    const { body } = await wireAndTap('fixed-3arg');
+    expect(body).not.toBeNull();
+    expect(body.reply_markup).toBeDefined();
+    const flat = body.reply_markup.inline_keyboard.flat().map((b: any) => b.callback_data);
+    expect(flat).toContain('act:deposit');
+    expect(flat).toContain('act:balance');
+  });
+
+  it('2-arg wrapper (the bug): HTTP body has no reply_markup — proves the regression', async () => {
+    const { body } = await wireAndTap('buggy-2arg');
+    expect(body).not.toBeNull();
+    expect(body.reply_markup).toBeUndefined();
+  });
+});

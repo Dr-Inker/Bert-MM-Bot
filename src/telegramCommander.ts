@@ -186,6 +186,23 @@ export class TelegramCommander {
     }
   }
 
+  /** Dismiss the loading spinner on a callback_query. Must be called within
+   *  15 seconds or Telegram marks the query as stale client-side. Errors are
+   *  logged and swallowed — the spinner clears itself after 15s regardless. */
+  async answerCallbackQuery(queryId: string, text?: string): Promise<void> {
+    try {
+      const body: Record<string, unknown> = { callback_query_id: queryId };
+      if (text) body.text = text;
+      await fetch(`https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      logger.warn({ err: e, queryId }, 'telegram answerCallbackQuery failed');
+    }
+  }
+
   private async pollLoop(): Promise<void> {
     while (this.running) {
       try {

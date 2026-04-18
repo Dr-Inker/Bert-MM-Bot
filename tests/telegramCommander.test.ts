@@ -155,3 +155,26 @@ describe('TelegramCommander.reply — extras', () => {
 });
 
 function fakeStore() { return { getUser: () => null } as any; }
+
+describe('TelegramCommander.answerCallbackQuery', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  it('POSTs to /answerCallbackQuery with the query id', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    await tg.answerCallbackQuery('abc123');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/answerCallbackQuery$/);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.callback_query_id).toBe('abc123');
+  });
+
+  it('swallows errors silently', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    fetchMock.mockRejectedValueOnce(new Error('network'));
+    await expect(tg.answerCallbackQuery('x')).resolves.toBeUndefined();
+  });
+});

@@ -107,14 +107,15 @@ describe('CommandHandlers — /account', () => {
     expect(h.handlers.pendingFor(7)?.kind).toBe('totp_setup_confirm');
   });
 
-  it('fully enrolled user: replies with help message', async () => {
+  it('fully enrolled user: replies with main menu keyboard', async () => {
     await enrollFully(h, 7);
     await h.handlers.handleAccount({ chatId: 5, userId: 7 });
     expect(h.reply).toHaveBeenCalledTimes(1);
-    const [, text] = h.reply.mock.calls[0];
-    expect(text).toMatch(/\/deposit/);
-    expect(text).toMatch(/\/balance/);
-    expect(text).toMatch(/\/withdraw/);
+    const [, text, extras] = h.reply.mock.calls[0];
+    expect(text).toMatch(/account ready/i);
+    const flat = extras?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+    expect(flat).toContain('act:deposit');
+    expect(flat).toContain('act:balance');
     expect(h.handlers.pendingFor(7)).toBeUndefined();
   });
 });
@@ -171,7 +172,7 @@ describe('CommandHandlers — /accept + /decline enrollment', () => {
     expect(h.handlers.pendingFor(7)).toBeUndefined();
     expect(h.reply).toHaveBeenCalledTimes(1);
     const [, text] = h.reply.mock.calls[0];
-    expect(text).toMatch(/2FA confirmed|\/deposit/i);
+    expect(text).toMatch(/account ready/i);
     // totp_enrolled audit event recorded
     const auditRows = h.store.listAudit({ sinceTs: 0, limit: 50 });
     expect(auditRows.some((r) => r.event === 'totp_enrolled')).toBe(true);
@@ -868,6 +869,53 @@ describe('CommandHandlers — /menu', () => {
       expect(flat).toContain('act:deposit');
       expect(flat).toContain('act:withdraw');
       expect(flat).toContain('nav:settings');
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('CommandHandlers — enrollment keyboards', () => {
+  it('handleAccount (new user) attaches disclaimer keyboard', async () => {
+    const h = buildHarness();
+    try {
+      await h.handlers.handleAccount({ chatId: 5, userId: 7 });
+      const [, , extras] = h.reply.mock.calls[0];
+      const flat = extras?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['enr:accept', 'enr:decline']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleAccept sends QR image (photoBase64) + cancel keyboard', async () => {
+    const h = buildHarness();
+    try {
+      h.handlers['pending'].set(7, { kind: 'disclaimer' } as any);
+      await h.handlers.handleAccept({ chatId: 5, userId: 7 });
+      const call = h.reply.mock.calls.find(([, , e]: any[]) => e?.photoBase64);
+      expect(call).toBeTruthy();
+      const [, caption, extras] = call!;
+      expect(caption).toMatch(/scan this QR/i);
+      expect(extras.photoBase64).toMatch(/^[A-Za-z0-9+/]+=*$/);
+      const flat = extras?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['cancel']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('post-enrollment confirmation reply attaches main menu keyboard', async () => {
+    const h = buildHarness();
+    try {
+      await h.enrollment.accept({ telegramId: 7, now: 100 });
+      const { secretBase32 } = await h.enrollment.beginTotpEnrollment({ telegramId: 7 });
+      h.handlers['pending'].set(7, { kind: 'totp_setup_confirm' } as any);
+      const { TOTP } = await import('otpauth');
+      const code = new TOTP({ secret: secretBase32 }).generate();
+      const restore = advancePastNextTotpStep();
+      try {
+        await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+      } finally { restore(); }
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const extras = last[2];
+      const flat = extras?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toContain('act:deposit');
+      expect(flat).toContain('act:balance');
     } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
   });
 });

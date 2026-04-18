@@ -8,8 +8,15 @@ import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
 import { computeNavPerShare, usdForShares, splitFee } from './shareMath.js';
 import { TotpRateLimiter, formatLockoutRemaining } from './rateLimiter.js';
-import { welcomeKeyboard, mainMenuKeyboard } from './uiKeyboards.js';
+import {
+  welcomeKeyboard,
+  mainMenuKeyboard,
+  disclaimerKeyboard,
+  cancelKeyboard,
+  errorKeyboard,
+} from './uiKeyboards.js';
 import { PublicKey } from '@solana/web3.js';
+import QRCode from 'qrcode';
 
 export interface ReplyFn {
   (chatId: number, text: string, extras?: { photoBase64?: string; keyboard?: InlineKeyboardMarkup }): Promise<void>;
@@ -160,7 +167,7 @@ export class CommandHandlers {
     const existing = this.deps.store.getUser(msg.userId);
     if (!existing) {
       this.pending.set(msg.userId, { kind: 'disclaimer' });
-      await this.deps.reply(msg.chatId, DISCLAIMER_TEXT);
+      await this.deps.reply(msg.chatId, DISCLAIMER_TEXT, { keyboard: disclaimerKeyboard() });
       return;
     }
     if (existing.totpEnrolledAt === null) {
@@ -168,25 +175,17 @@ export class CommandHandlers {
         telegramId: msg.userId,
       });
       this.pending.set(msg.userId, { kind: 'totp_setup_confirm' });
+      const otpauthUri = `otpauth://totp/BertMMVault:${msg.userId}?secret=${secretBase32}&issuer=BertMMVault`;
+      const dataUrl = await QRCode.toDataURL(otpauthUri);
+      const photoBase64 = dataUrl.replace(/^data:image\/png;base64,/, '');
       await this.deps.reply(
         msg.chatId,
-        `Set up 2FA in Google Authenticator (or Authy).\n` +
-          `Add a TOTP account with this text secret:\n\n` +
-          `${secretBase32}\n\n` +
-          `Then reply with the current 6-digit code to confirm.`,
+        `🔐 Scan this QR in Google Auth or Authy.\nOr enter secret manually: ${secretBase32}\n\nReply with the 6-digit code.`,
+        { photoBase64, keyboard: cancelKeyboard() },
       );
       return;
     }
-    await this.deps.reply(
-      msg.chatId,
-      `Account ready. Commands:\n` +
-        `/deposit — show your deposit address (TOTP)\n` +
-        `/balance — show shares + USD value (TOTP)\n` +
-        `/withdraw <usd|pct%> — queue a withdrawal (TOTP)\n` +
-        `/setwhitelist <addr> — set withdrawal destination (TOTP)\n` +
-        `/cancelwhitelist — cancel pending whitelist change (TOTP)\n` +
-        `/stats — vault TVL + NAV/share`,
-    );
+    await this.deps.reply(msg.chatId, 'Account ready.', { keyboard: mainMenuKeyboard() });
   }
 
   // ── /accept (disclaimer) ──────────────────────────────────────────────
@@ -211,12 +210,13 @@ export class CommandHandlers {
     });
     this.pending.set(msg.userId, { kind: 'totp_setup_confirm' });
     this.totpSetupFailures.delete(msg.userId);
+    const otpauthUri = `otpauth://totp/BertMMVault:${msg.userId}?secret=${secretBase32}&issuer=BertMMVault`;
+    const dataUrl = await QRCode.toDataURL(otpauthUri);
+    const photoBase64 = dataUrl.replace(/^data:image\/png;base64,/, '');
     await this.deps.reply(
       msg.chatId,
-      `Set up 2FA in Google Authenticator (or Authy).\n` +
-        `Add a TOTP account with this text secret:\n\n` +
-        `${secretBase32}\n\n` +
-        `Then reply with the current 6-digit code to confirm.`,
+      `🔐 Scan this QR in Google Auth or Authy.\nOr enter secret manually: ${secretBase32}\n\nReply with the 6-digit code.`,
+      { photoBase64, keyboard: cancelKeyboard() },
     );
   }
 
@@ -308,10 +308,7 @@ export class CommandHandlers {
       this.totpSetupFailures.delete(msg.userId);
       this.rateLimiter.recordSuccess(msg.userId);
       this.audit.write({ ts: now, telegramId: msg.userId, event: 'totp_enrolled' });
-      await this.deps.reply(
-        msg.chatId,
-        '2FA confirmed. /deposit /balance /withdraw /setwhitelist /stats',
-      );
+      await this.deps.reply(msg.chatId, '✅ Account ready.', { keyboard: mainMenuKeyboard() });
       return;
     }
     const failures = (this.totpSetupFailures.get(msg.userId) ?? 0) + 1;
@@ -335,6 +332,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Too many failed attempts. Locked for ${remaining}.`,
+        { keyboard: errorKeyboard({ retryCallback: 'nav:create_account' }) },
       );
       return;
     }
@@ -344,11 +342,12 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Too many invalid codes. Start over via /account.`,
+        { keyboard: errorKeyboard({ retryCallback: 'nav:create_account' }) },
       );
       return;
     }
     this.totpSetupFailures.set(msg.userId, failures);
-    await this.deps.reply(msg.chatId, 'Invalid code. Try again.');
+    await this.deps.reply(msg.chatId, 'Invalid code. Try again.', { keyboard: cancelKeyboard() });
   }
 
   /**

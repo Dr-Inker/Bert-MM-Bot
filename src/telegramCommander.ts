@@ -1,4 +1,5 @@
 import { logger } from './logger.js';
+import type { InlineKeyboardMarkup } from './types.js';
 import type { DepositorStore } from './vault/depositorStore.js';
 
 const POLL_INTERVAL_MS = 5_000;
@@ -147,14 +148,37 @@ export class TelegramCommander {
     this.running = false;
   }
 
-  /** Send a reply to the given chat. Public so handlers registered from main.ts can use it. */
-  async reply(chatId: number, text: string): Promise<void> {
+  /** Send a reply to the given chat. Public so handlers registered from main.ts can use it.
+   *  Optionally attaches an inline keyboard (reply_markup) and/or sends as a photo caption.
+   *  When photoBase64 is provided, the Bot API endpoint switches from sendMessage to sendPhoto. */
+  async reply(
+    chatId: number,
+    text: string,
+    extras?: { keyboard?: InlineKeyboardMarkup; photoBase64?: string },
+  ): Promise<void> {
+    const keyboard = extras?.keyboard;
+    const photoBase64 = extras?.photoBase64;
     try {
-      await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
-      });
+      if (photoBase64) {
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        form.append('caption', text);
+        const bytes = Buffer.from(photoBase64, 'base64');
+        form.append('photo', new Blob([bytes]), 'qr.png');
+        if (keyboard) form.append('reply_markup', JSON.stringify(keyboard));
+        await fetch(`https://api.telegram.org/bot${this.botToken}/sendPhoto`, {
+          method: 'POST',
+          body: form,
+        });
+      } else {
+        const body: Record<string, unknown> = { chat_id: chatId, text };
+        if (keyboard) body.reply_markup = keyboard;
+        await fetch(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      }
     } catch (e) {
       logger.warn({ err: e }, 'telegram commander reply failed');
     }

@@ -106,3 +106,38 @@ describe('TelegramCommander auth', () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('TelegramCommander.reply — extras', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  it('passes reply_markup when keyboard is provided', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    await tg.reply(42, 'hi', { keyboard: { inline_keyboard: [[{ text: 'x', callback_data: 'nav:home' }]] } });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.chat_id).toBe(42);
+    expect(body.text).toBe('hi');
+    expect(body.reply_markup).toEqual({ inline_keyboard: [[{ text: 'x', callback_data: 'nav:home' }]] });
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/sendMessage$/);
+  });
+
+  it('uses sendPhoto when photoBase64 provided', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    await tg.reply(42, 'caption', { photoBase64: 'aGVsbG8=' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/sendPhoto$/);
+  });
+
+  it('no extras → sendMessage with just chat_id + text (unchanged)', async () => {
+    const tg = new TelegramCommander({ botToken: 't', operatorUserId: 1, depositorStore: fakeStore() });
+    await tg.reply(42, 'hi');
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ chat_id: 42, text: 'hi' });
+  });
+});
+
+function fakeStore() { return { getUser: () => null } as any; }

@@ -919,3 +919,63 @@ describe('CommandHandlers — enrollment keyboards', () => {
     } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
   });
 });
+
+describe('CommandHandlers — deposit/balance/stats keyboards', () => {
+  it('handleDeposit prompt uses cancelKeyboard; reveal uses postDepositKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      const secret = await enrollFully(h, 7);
+      await h.handlers.handleDeposit({ chatId: 5, userId: 7 });
+      let last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      expect(last[2]?.keyboard?.inline_keyboard?.[0]?.[0]?.callback_data).toBe('cancel');
+      const restore = advancePastNextTotpStep();
+      try {
+        const code = await totpCodeFor(secret);
+        await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+      } finally { restore(); }
+      last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['act:balance', 'nav:home']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleBalance reveal uses postBalanceKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      const secret = await enrollFully(h, 7);
+      h.navProvider.totalUsd = 100; h.navProvider.totalShares = 50;
+      h.store.addShares(7, 25);
+      await h.handlers.handleBalance({ chatId: 5, userId: 7 });
+      const restore = advancePastNextTotpStep();
+      try {
+        const code = await totpCodeFor(secret);
+        await h.handlers.handleMessage({ chatId: 5, userId: 7, text: code });
+      } finally { restore(); }
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['act:withdraw', 'act:deposit', 'nav:home']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleStats reply includes [🏠 Menu] when user enrolled', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      h.navProvider.totalUsd = 100; h.navProvider.totalShares = 50;
+      await h.handlers.handleStats({ chatId: 5, userId: 7 });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['nav:home']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleStats reply has no keyboard for non-enrolled user (or no userId)', async () => {
+    const h = buildHarness();
+    try {
+      h.navProvider.totalUsd = 100; h.navProvider.totalShares = 50;
+      await h.handlers.handleStats({ chatId: 5 });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      expect(last[2]?.keyboard).toBeUndefined();
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+});

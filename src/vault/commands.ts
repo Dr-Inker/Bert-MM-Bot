@@ -14,6 +14,9 @@ import {
   disclaimerKeyboard,
   cancelKeyboard,
   errorKeyboard,
+  postDepositKeyboard,
+  postBalanceKeyboard,
+  postActionKeyboard,
 } from './uiKeyboards.js';
 import { PublicKey } from '@solana/web3.js';
 import QRCode from 'qrcode';
@@ -236,7 +239,11 @@ export class CommandHandlers {
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'deposit_reveal' });
-    await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to reveal your deposit address.');
+    await this.deps.reply(
+      msg.chatId,
+      'Reply with your current 6-digit 2FA code to reveal your deposit address.',
+      { keyboard: cancelKeyboard() },
+    );
   }
 
   /**
@@ -384,7 +391,11 @@ export class CommandHandlers {
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'balance_reveal' });
-    await this.deps.reply(msg.chatId, 'Reply with your current 6-digit 2FA code to view your balance.');
+    await this.deps.reply(
+      msg.chatId,
+      'Reply with your current 6-digit 2FA code to view your balance.',
+      { keyboard: cancelKeyboard() },
+    );
   }
 
   private async respondBalanceReveal(msg: { chatId: number; userId: number; text: string }): Promise<void> {
@@ -393,10 +404,18 @@ export class CommandHandlers {
     if (!v.ok) {
       if (v.locked) {
         const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
-        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        await this.deps.reply(
+          msg.chatId,
+          `Too many failed attempts. Locked for ${remaining}.`,
+          { keyboard: errorKeyboard({ retryCallback: 'act:balance' }) },
+        );
         return;
       }
-      await this.deps.reply(msg.chatId, '2FA code invalid. Try /balance again.');
+      await this.deps.reply(
+        msg.chatId,
+        '2FA code invalid. Try /balance again.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:balance' }) },
+      );
       return;
     }
     const shares = this.deps.store.getShares(msg.userId);
@@ -414,11 +433,12 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `${shares.toFixed(2)} shares — approx $${usd.toFixed(2)}\n(NAV/share: $${navPerShare.toFixed(6)})`,
+      { keyboard: postBalanceKeyboard() },
     );
   }
 
   // ── /stats (public) ───────────────────────────────────────────────────
-  async handleStats(msg: { chatId: number }): Promise<void> {
+  async handleStats(msg: { chatId: number; userId?: number }): Promise<void> {
     const nav = await this.deps.getNav();
     if (!nav) {
       await this.deps.reply(msg.chatId, 'BERT Vault stats unavailable — try again shortly.');
@@ -436,12 +456,19 @@ export class CommandHandlers {
       deltaLine = `24h: —`;
     }
     const tvlStr = nav.totalUsd.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const enrolled = msg.userId != null
+      ? (() => {
+          const u = this.deps.store.getUser(msg.userId!);
+          return !!u && u.totpEnrolledAt !== null;
+        })()
+      : false;
     await this.deps.reply(
       msg.chatId,
       `BERT Vault stats\n` +
         `TVL: $${tvlStr}\n` +
         `NAV/share: $${navPerShare.toFixed(2)}\n` +
         deltaLine,
+      enrolled ? { keyboard: postActionKeyboard() } : undefined,
     );
   }
 
@@ -751,10 +778,18 @@ export class CommandHandlers {
     if (!v.ok) {
       if (v.locked) {
         const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
-        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        await this.deps.reply(
+          msg.chatId,
+          `Too many failed attempts. Locked for ${remaining}.`,
+          { keyboard: errorKeyboard({ retryCallback: 'act:deposit' }) },
+        );
         return;
       }
-      await this.deps.reply(msg.chatId, '2FA code invalid. Try /deposit again.');
+      await this.deps.reply(
+        msg.chatId,
+        '2FA code invalid. Try /deposit again.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:deposit' }) },
+      );
       return;
     }
     const user = this.deps.store.getUser(msg.userId)!;
@@ -765,6 +800,7 @@ export class CommandHandlers {
       msg.chatId,
       `Your deposit address (SOL + BERT):\n${user.depositAddress}\n\n` +
         `Send SOL and/or BERT to this address. Funds will be swept + credited after the next tick.`,
+      { keyboard: postDepositKeyboard() },
     );
   }
 }

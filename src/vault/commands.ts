@@ -266,7 +266,11 @@ export class CommandHandlers {
   async handleDeposit(msg: { chatId: number; userId: number }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
     if (!user || user.totpEnrolledAt === null) {
-      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      await this.deps.reply(
+        msg.chatId,
+        'Please enroll first via /account.',
+        this.kb(postActionKeyboard()),
+      );
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
@@ -421,7 +425,11 @@ export class CommandHandlers {
   async handleBalance(msg: { chatId: number; userId: number }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
     if (!user || user.totpEnrolledAt === null) {
-      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      await this.deps.reply(
+        msg.chatId,
+        'Please enroll first via /account.',
+        this.kb(postActionKeyboard()),
+      );
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
@@ -456,7 +464,11 @@ export class CommandHandlers {
     const shares = this.deps.store.getShares(msg.userId);
     const nav = await this.deps.getNav();
     if (!nav) {
-      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      await this.deps.reply(
+        msg.chatId,
+        'NAV unavailable — try again shortly.',
+        this.kb(errorKeyboard({ retryCallback: 'act:balance' })),
+      );
       return;
     }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
@@ -525,11 +537,19 @@ export class CommandHandlers {
   async handleWithdraw(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
     if (!user || user.totpEnrolledAt === null) {
-      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      await this.deps.reply(
+        msg.chatId,
+        'Please enroll first via /account.',
+        this.kb(postActionKeyboard()),
+      );
       return;
     }
     if (!user.whitelistAddress) {
-      await this.deps.reply(msg.chatId, 'Set a withdrawal destination first via /setwhitelist.');
+      await this.deps.reply(
+        msg.chatId,
+        'Set a withdrawal destination first via /setwhitelist.',
+        this.kb(errorKeyboard({ retryCallback: 'nav:settings' })),
+      );
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
@@ -544,7 +564,11 @@ export class CommandHandlers {
     // Compute the user's available USD up-front so we can parse percentage.
     const nav = await this.deps.getNav();
     if (!nav) {
-      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      await this.deps.reply(
+        msg.chatId,
+        'NAV unavailable — try again shortly.',
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
@@ -555,14 +579,22 @@ export class CommandHandlers {
     if (raw.endsWith('%')) {
       const pct = Number(raw.slice(0, -1));
       if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
-        await this.deps.reply(msg.chatId, 'Invalid percentage. Use e.g. /withdraw 50%');
+        await this.deps.reply(
+          msg.chatId,
+          'Invalid percentage. Use e.g. /withdraw 50%',
+          this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+        );
         return;
       }
       amountUsd = userUsd * pct / 100;
     } else {
       const n = Number(raw);
       if (!Number.isFinite(n) || n <= 0) {
-        await this.deps.reply(msg.chatId, 'Invalid amount. Use e.g. /withdraw 100 or /withdraw 50%');
+        await this.deps.reply(
+          msg.chatId,
+          'Invalid amount. Use e.g. /withdraw 100 or /withdraw 50%',
+          this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+        );
         return;
       }
       amountUsd = n;
@@ -573,11 +605,16 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Amount below minimum ($${this.deps.config.minWithdrawalUsd.toFixed(2)}).`,
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
     if (amountUsd > userUsd + 1e-6) {
-      await this.deps.reply(msg.chatId, `Amount exceeds your balance ($${userUsd.toFixed(2)}).`);
+      await this.deps.reply(
+        msg.chatId,
+        `Amount exceeds your balance ($${userUsd.toFixed(2)}).`,
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     const countToday = this.deps.store.countUserWithdrawalsLast24h(msg.userId, this.deps.nowMs());
@@ -585,6 +622,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Daily withdrawal limit reached (${this.deps.config.maxDailyWithdrawalsPerUser}/day). Try again tomorrow.`,
+        this.kb(postActionKeyboard()),
       );
       return;
     }
@@ -594,6 +632,7 @@ export class CommandHandlers {
         msg.chatId,
         `Daily USD cap would be exceeded ` +
           `(cap $${this.deps.config.maxDailyWithdrawalUsdPerUser.toFixed(0)}, used $${usdToday.toFixed(2)}).`,
+        this.kb(postActionKeyboard()),
       );
       return;
     }
@@ -601,6 +640,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `Withdrawal queue is full right now. Try again in a few minutes.`,
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
       );
       return;
     }
@@ -619,28 +659,48 @@ export class CommandHandlers {
     this.pending.delete(msg.userId);
     const n = Number(msg.text.trim());
     if (!Number.isFinite(n) || n <= 0) {
-      await this.deps.reply(msg.chatId, 'Invalid amount. Start again via /withdraw.');
+      await this.deps.reply(
+        msg.chatId,
+        'Invalid amount. Start again via /withdraw.',
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     const user = this.deps.store.getUser(msg.userId);
     if (!user?.whitelistAddress) {
-      await this.deps.reply(msg.chatId, 'Set a withdrawal destination first via /setwhitelist.');
+      await this.deps.reply(
+        msg.chatId,
+        'Set a withdrawal destination first via /setwhitelist.',
+        this.kb(errorKeyboard({ retryCallback: 'nav:settings' })),
+      );
       return;
     }
     const nav = await this.deps.getNav();
     if (!nav) {
-      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      await this.deps.reply(
+        msg.chatId,
+        'NAV unavailable — try again shortly.',
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     const shares = this.deps.store.getShares(msg.userId);
     const userUsd = usdForShares({ netShares: shares, navPerShare });
     if (n < this.deps.config.minWithdrawalUsd) {
-      await this.deps.reply(msg.chatId, `Amount below minimum ($${this.deps.config.minWithdrawalUsd.toFixed(2)}).`);
+      await this.deps.reply(
+        msg.chatId,
+        `Amount below minimum ($${this.deps.config.minWithdrawalUsd.toFixed(2)}).`,
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     if (n > userUsd + 1e-6) {
-      await this.deps.reply(msg.chatId, `Amount exceeds your balance ($${userUsd.toFixed(2)}).`);
+      await this.deps.reply(
+        msg.chatId,
+        `Amount exceeds your balance ($${userUsd.toFixed(2)}).`,
+        this.kb(errorKeyboard({ retryCallback: 'act:withdraw' })),
+      );
       return;
     }
     this.pending.set(msg.userId, { kind: 'withdraw', amountUsd: n });
@@ -725,7 +785,11 @@ export class CommandHandlers {
   async handleSetWhitelist(msg: { chatId: number; userId: number; text: string }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
     if (!user || user.totpEnrolledAt === null) {
-      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      await this.deps.reply(
+        msg.chatId,
+        'Please enroll first via /account.',
+        this.kb(postActionKeyboard()),
+      );
       return;
     }
     const parts = msg.text.trim().split(/\s+/);
@@ -773,7 +837,11 @@ export class CommandHandlers {
   async handleCancelWhitelist(msg: { chatId: number; userId: number }): Promise<void> {
     const user = this.deps.store.getUser(msg.userId);
     if (!user || user.totpEnrolledAt === null) {
-      await this.deps.reply(msg.chatId, 'Please enroll first via /account.');
+      await this.deps.reply(
+        msg.chatId,
+        'Please enroll first via /account.',
+        this.kb(postActionKeyboard()),
+      );
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;

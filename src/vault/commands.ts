@@ -166,6 +166,16 @@ export class CommandHandlers {
     return this.pending.get(userId);
   }
 
+  /** Set a pending action for the user. Used by uiCallbacks (e.g. wd:custom). */
+  setPending(userId: number, action: PendingAction): void {
+    this.pending.set(userId, action);
+  }
+
+  /** Clear any pending action for the user. Used by uiCallbacks (cancel button). */
+  clearPending(userId: number): void {
+    this.pending.delete(userId);
+  }
+
   // ── /account ───────────────────────────────────────────────────────────
   async handleAccount(msg: { chatId: number; userId: number }): Promise<void> {
     const existing = this.deps.store.getUser(msg.userId);

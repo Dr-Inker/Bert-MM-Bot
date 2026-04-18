@@ -845,3 +845,29 @@ describe('CommandHandlers — withdraw_amount_entry', () => {
     }
   });
 });
+
+describe('CommandHandlers — /menu', () => {
+  it('unenrolled user gets welcome text + welcomeKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      await h.handlers.handleMenu({ chatId: 5, userId: 7 });
+      const [chatId, text, extras] = h.reply.mock.calls[0];
+      expect(chatId).toBe(5);
+      expect(text).toMatch(/Welcome/i);
+      expect(extras?.keyboard?.inline_keyboard?.[0]?.[0]?.callback_data).toBe('nav:create_account');
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('enrolled user gets main menu keyboard', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      await h.handlers.handleMenu({ chatId: 5, userId: 7 });
+      const [, , extras] = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = extras?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toContain('act:deposit');
+      expect(flat).toContain('act:withdraw');
+      expect(flat).toContain('nav:settings');
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+});

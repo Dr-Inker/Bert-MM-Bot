@@ -1,16 +1,18 @@
 import type { DepositorStore } from './depositorStore.js';
 import type { Enrollment } from './enrollment.js';
 import type { Cooldowns } from './cooldowns.js';
+import type { InlineKeyboardMarkup } from '../types.js';
 import { DISCLAIMER_TEXT } from './disclaimer.js';
 import { AuditLog } from './audit.js';
 import { decrypt } from './encryption.js';
 import { verifyCode } from './totp.js';
 import { computeNavPerShare, usdForShares, splitFee } from './shareMath.js';
 import { TotpRateLimiter, formatLockoutRemaining } from './rateLimiter.js';
+import { welcomeKeyboard, mainMenuKeyboard } from './uiKeyboards.js';
 import { PublicKey } from '@solana/web3.js';
 
 export interface ReplyFn {
-  (chatId: number, text: string, extras?: { photoBase64?: string }): Promise<void>;
+  (chatId: number, text: string, extras?: { photoBase64?: string; keyboard?: InlineKeyboardMarkup }): Promise<void>;
 }
 
 export interface CommandsConfig {
@@ -442,6 +444,20 @@ export class CommandHandlers {
         `NAV/share: $${navPerShare.toFixed(2)}\n` +
         deltaLine,
     );
+  }
+
+  // ── /menu ─────────────────────────────────────────────────────────────
+  async handleMenu(msg: { chatId: number; userId: number }): Promise<void> {
+    const user = this.deps.store.getUser(msg.userId);
+    if (!user || user.totpEnrolledAt === null) {
+      await this.deps.reply(
+        msg.chatId,
+        '👋 Welcome to BertMM Vault. You need to create an account first.',
+        { keyboard: welcomeKeyboard() },
+      );
+      return;
+    }
+    await this.deps.reply(msg.chatId, '🏦 BertMM Vault', { keyboard: mainMenuKeyboard() });
   }
 
   // ── /withdraw ─────────────────────────────────────────────────────────

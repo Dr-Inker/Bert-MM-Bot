@@ -25,6 +25,7 @@ import { WithdrawalExecutor } from './vault/withdrawalExecutor.js';
 import { buildWithdrawalInstructions } from './vault/withdrawalBuilder.js';
 import { computeNavPerShare } from './vault/shareMath.js';
 import { runVaultPreRebalance, runVaultPostRebalance } from './vault/tick.js';
+import { makeCallbackRouter } from './vault/uiCallbacks.js';
 import { decide, StrategyParams } from './strategy.js';
 import { computeTrustedMid, fetchAllSources } from './priceOracle.js';
 import { createVenueClient } from './venueClient.js';
@@ -467,6 +468,11 @@ async function main(): Promise<void> {
           tgCmd.registerVaultCommand('withdraw', (msg) => handlers.handleWithdraw(msg));
           tgCmd.registerVaultCommand('setwhitelist', (msg) => handlers.handleSetWhitelist(msg));
           tgCmd.registerVaultCommand('cancelwhitelist', (msg) => handlers.handleCancelWhitelist(msg));
+          // /menu under enrollment-kind only: TelegramCommander.handlers Map keys
+          // by command name so a vault-kind registration would be overwritten.
+          // enrollment-kind permits all users (including non-registered), and
+          // handleMenu itself routes unenrolled → welcome, enrolled → main menu.
+          tgCmd.registerEnrollmentCommand('menu', (msg) => handlers.handleMenu(msg));
           tgCmd.registerPublicCommand('stats', (msg) => handlers.handleStats(msg));
           // Non-command text messages (TOTP replies) route through fallback
           tgCmd.registerFallback((msg) => handlers.handleMessage(msg));
@@ -490,6 +496,17 @@ async function main(): Promise<void> {
           tgCmd.registerOperatorCommand('forceprocess', (msg) => operatorHandlers.handleForceProcess(msg));
           tgCmd.registerOperatorCommand('recreditdeposit', (msg) => operatorHandlers.handleRecreditDeposit(msg));
           tgCmd.registerOperatorCommand('resettotp', (msg) => operatorHandlers.handleResetTotp(msg));
+
+          // T11: wire inline-keyboard callback router (only when uiButtons on).
+          // Setting the router widens TelegramCommander's allowed_updates to
+          // include callback_query (see telegramCommander.ts pollLoop).
+          if (cfg.vault.uiButtons) {
+            const router = makeCallbackRouter({
+              handlers,
+              reply: (chatId, text, extras) => tgCmd.reply(chatId, text, extras),
+            });
+            tgCmd.setCallbackRouter((q) => router(q));
+          }
           logger.info('vault commands wired into telegram commander');
         } catch (e) {
           logger.error({ err: e }, 'vault wiring failed — vault commands disabled');

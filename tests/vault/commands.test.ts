@@ -979,3 +979,57 @@ describe('CommandHandlers — deposit/balance/stats keyboards', () => {
     } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
   });
 });
+
+describe('CommandHandlers — withdraw/whitelist keyboards', () => {
+  it('handleWithdraw with no arg shows amount picker + sets pending=withdraw_amount_entry', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      h.store.setWhitelistImmediate({ telegramId: 7, address: 'A'.repeat(44), ts: 1 });
+      await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw' });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      expect(last[1]).toMatch(/how much/i);
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toContain('wd:p50');
+      expect(flat).toContain('wd:custom');
+      expect(h.handlers.pendingFor(7)?.kind).toBe('withdraw_amount_entry');
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleWithdraw <amount> prompt uses cancelKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      h.store.setWhitelistImmediate({ telegramId: 7, address: 'A'.repeat(44), ts: 1 });
+      h.navProvider.totalUsd = 100; h.navProvider.totalShares = 50;
+      h.store.addShares(7, 25);
+      await h.handlers.handleWithdraw({ chatId: 5, userId: 7, text: '/withdraw 50%' });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['cancel']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleSetWhitelist prompt uses cancelKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      await h.handlers.handleSetWhitelist({ chatId: 5, userId: 7, text: '/setwhitelist' });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['cancel']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
+  it('handleCancelWhitelist prompt uses cancelKeyboard', async () => {
+    const h = buildHarness();
+    try {
+      await enrollFully(h, 7);
+      h.store.setWhitelistImmediate({ telegramId: 7, address: 'A'.repeat(44), ts: 1 });
+      await h.handlers.handleCancelWhitelist({ chatId: 5, userId: 7 });
+      const last = h.reply.mock.calls[h.reply.mock.calls.length - 1];
+      const flat = last[2]?.keyboard?.inline_keyboard?.flat().map((b: any) => b.callback_data) ?? [];
+      expect(flat).toEqual(['cancel']);
+    } finally { h.state.close(); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+});

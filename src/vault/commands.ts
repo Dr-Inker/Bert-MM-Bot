@@ -17,6 +17,7 @@ import {
   postDepositKeyboard,
   postBalanceKeyboard,
   postActionKeyboard,
+  withdrawAmountKeyboard,
 } from './uiKeyboards.js';
 import { PublicKey } from '@solana/web3.js';
 import QRCode from 'qrcode';
@@ -501,7 +502,8 @@ export class CommandHandlers {
     const parts = msg.text.trim().split(/\s+/);
     const raw = parts[1];
     if (!raw) {
-      await this.deps.reply(msg.chatId, 'Usage: /withdraw <usd-amount|percent%>  (e.g., /withdraw 100 or /withdraw 50%)');
+      this.pending.set(msg.userId, { kind: 'withdraw_amount_entry' });
+      await this.deps.reply(msg.chatId, 'How much to withdraw?', { keyboard: withdrawAmountKeyboard() });
       return;
     }
 
@@ -573,6 +575,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Reply with your 2FA code to queue a $${amountUsd.toFixed(2)} withdrawal to ${user.whitelistAddress}.`,
+      { keyboard: cancelKeyboard() },
     );
   }
 
@@ -610,6 +613,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Withdraw $${n.toFixed(2)} to ${user.whitelistAddress.slice(0, 6)}…${user.whitelistAddress.slice(-4)}?\nReply with your 6-digit code to confirm.`,
+      { keyboard: cancelKeyboard() },
     );
   }
 
@@ -622,25 +626,45 @@ export class CommandHandlers {
     if (!v.ok) {
       if (v.locked) {
         const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
-        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        await this.deps.reply(
+          msg.chatId,
+          `Too many failed attempts. Locked for ${remaining}.`,
+          { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+        );
         return;
       }
-      await this.deps.reply(msg.chatId, '2FA code invalid. Try /withdraw again.');
+      await this.deps.reply(
+        msg.chatId,
+        '2FA code invalid. Try /withdraw again.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+      );
       return;
     }
     const user = this.deps.store.getUser(msg.userId)!;
     if (!user.whitelistAddress) {
-      await this.deps.reply(msg.chatId, 'No whitelist address set.');
+      await this.deps.reply(
+        msg.chatId,
+        'No whitelist address set.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+      );
       return;
     }
     const nav = await this.deps.getNav();
     if (!nav) {
-      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      await this.deps.reply(
+        msg.chatId,
+        'NAV unavailable — try again shortly.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+      );
       return;
     }
     const navPerShare = computeNavPerShare({ totalUsd: nav.totalUsd, totalShares: nav.totalShares });
     if (navPerShare <= 0) {
-      await this.deps.reply(msg.chatId, 'NAV unavailable — try again shortly.');
+      await this.deps.reply(
+        msg.chatId,
+        'NAV unavailable — try again shortly.',
+        { keyboard: errorKeyboard({ retryCallback: 'act:withdraw' }) },
+      );
       return;
     }
     const sharesBurned = pending.amountUsd / navPerShare;
@@ -659,6 +683,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       `Queued! Your withdrawal of $${pending.amountUsd.toFixed(2)} will be processed on the next tick.`,
+      { keyboard: postActionKeyboard() },
     );
   }
 
@@ -672,14 +697,22 @@ export class CommandHandlers {
     const parts = msg.text.trim().split(/\s+/);
     const addr = parts[1];
     if (!addr) {
-      await this.deps.reply(msg.chatId, 'Usage: /setwhitelist <solana-address>');
+      await this.deps.reply(
+        msg.chatId,
+        'Usage: /setwhitelist <solana-address>',
+        { keyboard: cancelKeyboard() },
+      );
       return;
     }
     try {
       // eslint-disable-next-line no-new
       new PublicKey(addr);
     } catch {
-      await this.deps.reply(msg.chatId, 'That does not look like a valid Solana address.');
+      await this.deps.reply(
+        msg.chatId,
+        'That does not look like a valid Solana address.',
+        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+      );
       return;
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
@@ -688,6 +721,7 @@ export class CommandHandlers {
       await this.deps.reply(
         msg.chatId,
         `First whitelist setup. Reply with your 2FA code to set ${addr} immediately.`,
+        { keyboard: cancelKeyboard() },
       );
     } else {
       this.pending.set(msg.userId, { kind: 'setwhitelist_change', address: addr });
@@ -696,6 +730,7 @@ export class CommandHandlers {
         `Whitelist change requested: ${addr}.\n` +
           `Reply with your 2FA code to enqueue. Changes activate after a 24-hour cooldown; ` +
           `use /cancelwhitelist before it activates to abort.`,
+        { keyboard: cancelKeyboard() },
       );
     }
   }
@@ -709,7 +744,11 @@ export class CommandHandlers {
     }
     if (await this.rejectIfLocked(msg.chatId, msg.userId)) return;
     this.pending.set(msg.userId, { kind: 'cancelwhitelist' });
-    await this.deps.reply(msg.chatId, 'Reply with your 2FA code to cancel the pending whitelist change.');
+    await this.deps.reply(
+      msg.chatId,
+      'Reply with your 2FA code to cancel the pending whitelist change.',
+      { keyboard: cancelKeyboard() },
+    );
   }
 
   private async respondSetWhitelist(
@@ -721,10 +760,18 @@ export class CommandHandlers {
     if (!v.ok) {
       if (v.locked) {
         const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
-        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        await this.deps.reply(
+          msg.chatId,
+          `Too many failed attempts. Locked for ${remaining}.`,
+          { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+        );
         return;
       }
-      await this.deps.reply(msg.chatId, '2FA code invalid. Try /setwhitelist again.');
+      await this.deps.reply(
+        msg.chatId,
+        '2FA code invalid. Try /setwhitelist again.',
+        { keyboard: errorKeyboard({ retryCallback: 'wl:set' }) },
+      );
       return;
     }
     const result = this.deps.cooldowns.requestChange({
@@ -735,12 +782,17 @@ export class CommandHandlers {
       details: { address: pending.address, immediate: result.immediate, activatesAt: result.activatesAt },
     });
     if (result.immediate) {
-      await this.deps.reply(msg.chatId, `Whitelist set to ${pending.address} (effective immediately).`);
+      await this.deps.reply(
+        msg.chatId,
+        `Whitelist set to ${pending.address} (effective immediately).`,
+        { keyboard: postActionKeyboard() },
+      );
     } else {
       const activates = new Date(result.activatesAt).toISOString();
       await this.deps.reply(
         msg.chatId,
         `Whitelist change queued. Activates at ${activates}. Use /cancelwhitelist to abort before then.`,
+        { keyboard: postActionKeyboard() },
       );
     }
   }
@@ -753,10 +805,18 @@ export class CommandHandlers {
     if (!v.ok) {
       if (v.locked) {
         const remaining = formatLockoutRemaining(v.until - this.deps.nowMs());
-        await this.deps.reply(msg.chatId, `Too many failed attempts. Locked for ${remaining}.`);
+        await this.deps.reply(
+          msg.chatId,
+          `Too many failed attempts. Locked for ${remaining}.`,
+          { keyboard: errorKeyboard({ retryCallback: 'wl:cancel' }) },
+        );
         return;
       }
-      await this.deps.reply(msg.chatId, '2FA code invalid. Try /cancelwhitelist again.');
+      await this.deps.reply(
+        msg.chatId,
+        '2FA code invalid. Try /cancelwhitelist again.',
+        { keyboard: errorKeyboard({ retryCallback: 'wl:cancel' }) },
+      );
       return;
     }
     const ok = this.deps.cooldowns.cancelPending({
@@ -769,6 +829,7 @@ export class CommandHandlers {
     await this.deps.reply(
       msg.chatId,
       ok ? 'Pending whitelist change cancelled.' : 'Nothing to cancel — no pending whitelist change.',
+      { keyboard: postActionKeyboard() },
     );
   }
 

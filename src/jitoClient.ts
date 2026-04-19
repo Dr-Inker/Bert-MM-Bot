@@ -23,15 +23,17 @@ import { logger } from './logger.js';
  * should fall back to regular RPC submission.
  */
 
-// Well-known Jito tip accounts — one is picked at random per submission.
+// Default Jito tip accounts — one is picked at random per submission.
+// Acts as a fallback if the startup refresh against getTipAccounts fails.
 // Source: https://docs.jito.wtf/lowlatencytxnsend/#tip-amount
-const JITO_TIP_ACCOUNTS = [
+// Sanity-checked against live `getTipAccounts` on 2026-04-19.
+const DEFAULT_JITO_TIP_ACCOUNTS = [
   '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
   'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
   'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
   'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
   'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
-  'ADuUkR4vqLUMWXxW9gh6D6L8pivKeVGVWXpTYR3Dz78V',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
   'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
   '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
 ].map((a) => new PublicKey(a));
@@ -43,11 +45,48 @@ export interface JitoClientOptions {
 }
 
 export class JitoClient {
+  private tipAccounts: PublicKey[] = DEFAULT_JITO_TIP_ACCOUNTS;
+
   constructor(
     private readonly connection: Connection,
     private readonly payer: Keypair,
     private readonly opts: JitoClientOptions,
   ) {}
+
+  /**
+   * Fetch the canonical tip-account list from the block engine and swap it
+   * in. Guards against silent breakage when Jito rotates accounts (any tip
+   * to an unrecognized pubkey fails with "must write lock at least one tip
+   * account"). On failure we keep DEFAULT_JITO_TIP_ACCOUNTS — safe, since
+   * the defaults match the canonical list as of the sanity-check date.
+   */
+  async refreshTipAccounts(timeoutMs = 5_000): Promise<void> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${this.opts.blockEngineUrl}/api/v1/bundles`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getTipAccounts',
+          params: [],
+        }),
+        signal: ctrl.signal,
+      });
+      const data = (await res.json()) as { result?: string[]; error?: { message?: string } };
+      if (!data.result || !Array.isArray(data.result) || data.result.length === 0) {
+        throw new Error(data.error?.message ?? 'empty tip-account list');
+      }
+      this.tipAccounts = data.result.map((a) => new PublicKey(a));
+      logger.info({ count: this.tipAccounts.length }, 'jito: refreshed tip accounts');
+    } catch (e) {
+      logger.warn({ err: e }, 'jito: tip-account refresh failed; using hardcoded fallback');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   /**
    * Submit a transaction as a single-tx Jito bundle. Appends a tip
@@ -66,7 +105,7 @@ export class JitoClient {
     protectedTx.add(...tx.instructions);
 
     const tipAccount =
-      JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]!;
+      this.tipAccounts[Math.floor(Math.random() * this.tipAccounts.length)]!;
     protectedTx.add(
       SystemProgram.transfer({
         fromPubkey: this.payer.publicKey,

@@ -77,6 +77,7 @@ async function main(): Promise<void> {
       },
       'mev protection enabled — swap-to-ratio will route through jito',
     );
+    await jito.refreshTipAccounts();
   }
   const submitter = new TxSubmitter(raydium.getConnection(), payer, jito);
   const fetchers = makeFetchers(raydium, cfg.poolAddress);

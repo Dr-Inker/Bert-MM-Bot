@@ -855,9 +855,9 @@ export class CommandHandlers {
     });
     await this.deps.reply(
       chatId,
-      `Queued as #${id}! Your withdrawal of $${amountUsd.toFixed(2)} will be processed on the next tick. ` +
-        `If it fails and you need it retried, reference ID #${id}.`,
-      this.kb(postActionKeyboard()),
+      `Queued as #\`${id}\`! Your withdrawal of $${amountUsd.toFixed(2)} will be processed on the next tick. ` +
+        `If it fails and you need it retried, reference ID #\`${id}\`.`,
+      { ...this.kb(postActionKeyboard()), parseMode: 'Markdown' },
     );
   }
 
